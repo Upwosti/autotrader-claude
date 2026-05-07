@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ﻿# AutoTrader Claude
 
 Automated MT5 Trading Bot powered by Claude AI.
@@ -13,3 +14,7 @@ Automated MT5 Trading Bot powered by Claude AI.
 - 	rader/ - Trading logic
 - strategies/ - Trading strategies
 - utils/ - Utilities
+=======
+# autotrader-claude
+AutoTrader Claude - Automated MT5 Trading Bot
+>>>>>>> ce699611e888a2cf56520dfc76035a5c7d098ced
