@@ -135,18 +135,18 @@ PARAM_RANGES = {
     "use_weekly_filter":[True, False],
     "use_ema_stack":    [True, False],
     "use_expansion":    [True, False],
-    "use_ict_filter":   [True, False],
-    "ict_min_score":    [30, 40, 50, 60],
+    # use_ict_filter excluded: ICT scorer is too slow to include in mutation search
+    # ict_min_score excluded: only relevant if use_ict_filter is manually enabled
 }
 
 PARAM_PRIORITIES = [
     "tp_rrr", "sl_atr_mult", "min_confluence",
-    "use_ict_filter", "use_pattern", "rsi_long_max",
+    "use_pattern", "rsi_long_max",
     "rsi_short_min", "min_adx", "ema_slow",
     "use_adx_filter", "use_weekly_filter", "use_ema_stack",
     "ema_fast", "ema_long", "min_hold_bars",
     "rsi_long_min", "rsi_short_max", "use_expansion",
-    "ict_min_score", "atr_period",
+    "atr_period",
 ]
 
 
@@ -467,7 +467,7 @@ class AutoTraderEngine:
             xau_wr = self.best_wr.get(pair, 0)
             if xau_wr >= 0.65:
                 # boost high-value params for final push to 80%
-                boost = ["use_ict_filter", "tp_rrr", "min_confluence",
+                boost = ["tp_rrr", "min_confluence",
                          "use_ema_stack", "sl_atr_mult"]
                 candidates = boost + [p for p in candidates if p not in boost]
 
