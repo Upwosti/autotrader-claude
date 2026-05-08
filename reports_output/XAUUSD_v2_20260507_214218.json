@@ -1,0 +1,183 @@
+{
+  "metadata": {
+    "strategy_version": 2,
+    "pair": "XAUUSD",
+    "timeframe": "H4",
+    "start_date": "2025-11-14",
+    "end_date": "2026-05-07",
+    "generated_at": "2026-05-07T21:42:18.858700"
+  },
+  "performance": {
+    "initial_capital": 10000.0,
+    "final_capital": 10584.879374853965,
+    "total_return_pct": 5.848793748539647,
+    "win_rate": 0.35714285714285715,
+    "total_trades": 14,
+    "winning_trades": 5,
+    "losing_trades": 9,
+    "avg_rrr": 1.8097142857142856,
+    "max_drawdown_pct": 7.450507593468981,
+    "sharpe_ratio": 7.388044396184922,
+    "profit_factor": 1.0578063399041022
+  },
+  "flags": {
+    "overfitting": false,
+    "small_sample": true
+  },
+  "trades": [
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2025-11-17 08:00:00+00:00",
+      "exit_time": "2025-11-17 08:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -120.0,
+      "rrr": 1.0,
+      "confidence": 5.0,
+      "session": "london"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2025-11-19 08:00:00+00:00",
+      "exit_time": "2025-12-18 16:00:00+00:00",
+      "outcome": "win",
+      "pnl_pips": 3224.0,
+      "rrr": 4.0,
+      "confidence": 5.5,
+      "session": "london"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2025-12-19 08:00:00+00:00",
+      "exit_time": "2025-12-22 00:00:00+00:00",
+      "outcome": "win",
+      "pnl_pips": 524.0,
+      "rrr": 4.0,
+      "confidence": 7.0,
+      "session": "london"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2025-12-22 08:00:00+00:00",
+      "exit_time": "2025-12-29 12:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -1095.0,
+      "rrr": 1.0,
+      "confidence": 8.0,
+      "session": "london"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2025-12-31 12:00:00+00:00",
+      "exit_time": "2026-01-02 08:00:00+00:00",
+      "outcome": "win",
+      "pnl_pips": 864.0,
+      "rrr": 4.0,
+      "confidence": 7.0,
+      "session": "london"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-01-02 16:00:00+00:00",
+      "exit_time": "2026-01-09 12:00:00+00:00",
+      "outcome": "win",
+      "pnl_pips": 1776.01,
+      "rrr": 4.0,
+      "confidence": 10.0,
+      "session": "ny"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-01-13 04:00:00+00:00",
+      "exit_time": "2026-01-13 04:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -164.0,
+      "rrr": 1.0,
+      "confidence": 7.5,
+      "session": "off_session"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-01-13 12:00:00+00:00",
+      "exit_time": "2026-01-13 12:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -100.0,
+      "rrr": 1.0,
+      "confidence": 9.0,
+      "session": "london"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-01-13 20:00:00+00:00",
+      "exit_time": "2026-01-13 20:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -183.0,
+      "rrr": 1.0,
+      "confidence": 7.5,
+      "session": "off_session"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-01-14 04:00:00+00:00",
+      "exit_time": "2026-01-16 12:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -544.0,
+      "rrr": 1.0,
+      "confidence": 7.5,
+      "session": "off_session"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-01-30 16:00:00+00:00",
+      "exit_time": "2026-01-30 16:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -963.0,
+      "rrr": 1.0,
+      "confidence": 10.0,
+      "session": "ny"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-02-01 20:00:00+00:00",
+      "exit_time": "2026-02-01 20:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -1091.0,
+      "rrr": 1.0,
+      "confidence": 7.0,
+      "session": "off_session"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-02-02 12:00:00+00:00",
+      "exit_time": "2026-03-22 20:00:00+00:00",
+      "outcome": "loss",
+      "pnl_pips": -3248.0,
+      "rrr": 1.0,
+      "confidence": 8.5,
+      "session": "london"
+    },
+    {
+      "pair": "XAUUSD",
+      "direction": "long",
+      "entry_time": "2026-03-25 04:00:00+00:00",
+      "exit_time": "2026-05-07 20:00:00+00:00",
+      "outcome": "win",
+      "pnl_pips": 1554.0,
+      "rrr": 0.336,
+      "confidence": 6.5,
+      "session": "off_session"
+    }
+  ]
+}

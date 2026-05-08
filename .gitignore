@@ -1,0 +1,14 @@
+﻿venv/
+data_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+logs/
+local_db/
+backup/
+*.pkl
+*.dll
+*.so
+*.egg-info

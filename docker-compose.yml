@@ -1,0 +1,93 @@
+version: '3.9'
+
+services:
+  autotrader:
+    build: .
+    container_name: autotrader_main
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./local_db:/app/local_db
+      - ./.env:/app/.env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - trading_net
+
+  watchdog:
+    build: .
+    container_name: autotrader_watchdog
+    restart: unless-stopped
+    command: python watchdog.py --hours 0
+    volumes:
+      - ./logs:/app/logs
+      - ./local_db:/app/local_db
+      - ./.env:/app/.env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+    depends_on:
+      - postgres
+      - redis
+      - autotrader
+    networks:
+      - trading_net
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: autotrader_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=autotrader
+      - POSTGRES_USER=autotrader
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-autotrader123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - trading_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: autotrader_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - trading_net
+
+  dashboard:
+    build: .
+    container_name: autotrader_dashboard
+    restart: unless-stopped
+    command: python -m flask --app dashboard/app.py run --host 0.0.0.0 --port 5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./logs:/app/logs
+      - ./local_db:/app/local_db
+      - ./.env:/app/.env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - trading_net
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  trading_net:
+    driver: bridge

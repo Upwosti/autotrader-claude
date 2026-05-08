@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoTrader Institutional Dashboard</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.8.0/umd/Recharts.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@3/base.css" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-card: #111827;
+      --bg-card2: #1a2235;
+      --accent: #3b82f6;
+      --accent2: #10b981;
+      --accent3: #f59e0b;
+      --danger: #ef4444;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --border: #1e293b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg-primary); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; }
+    #root { min-height: 100vh; }
+    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+    .card2 { background: var(--bg-card2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+    .metric-big { font-size: 28px; font-weight: 700; }
+    .metric-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .green { color: var(--accent2); }
+    .blue { color: var(--accent); }
+    .amber { color: var(--accent3); }
+    .red { color: var(--danger); }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .badge-green { background: rgba(16,185,129,0.15); color: var(--accent2); }
+    .badge-red { background: rgba(239,68,68,0.15); color: var(--danger); }
+    .badge-blue { background: rgba(59,130,246,0.15); color: var(--accent); }
+    .badge-amber { background: rgba(245,158,11,0.15); color: var(--accent3); }
+    .nav { background: var(--bg-card); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; gap: 4px; height: 52px; }
+    .nav-btn { padding: 6px 14px; border-radius: 6px; cursor: pointer; border: none; background: transparent; color: var(--text-muted); font-size: 13px; transition: all 0.15s; }
+    .nav-btn:hover, .nav-btn.active { background: var(--border); color: var(--text); }
+    .nav-logo { font-weight: 700; font-size: 16px; color: var(--accent); margin-right: 20px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .progress-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; border-bottom: 1px solid var(--border); }
+    td { padding: 10px 12px; border-bottom: 1px solid rgba(30,41,59,0.5); }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); display: inline-block; margin-right: 6px; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.8)} }
+    .scrollable { max-height: 400px; overflow-y: auto; }
+    .scrollable::-webkit-scrollbar { width: 4px; }
+    .scrollable::-webkit-scrollbar-track { background: transparent; }
+    .scrollable::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .section-title { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/javascript">
+const { useState, useEffect, useCallback, createElement: h } = React;
+const { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } = Recharts;
+
+const API = '';  // same origin
+
+// ── Data fetching ─────────────────────────────────────────────────────────────
+async function fetchAPI(path) {
+  try {
+    const r = await fetch(API + path);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+const pct = v => v == null ? '—' : (v * 100).toFixed(1) + '%';
+const fmt2 = v => v == null ? '—' : v.toFixed(2);
+const fmtN = v => v == null ? '—' : v.toLocaleString();
+
+function MetricCard({ label, value, sub, color = '#3b82f6', size = 'big' }) {
+  return h('div', { className: 'card', style: { padding: '16px' } },
+    h('div', { className: 'metric-label' }, label),
+    h('div', { className: 'metric-big', style: { color, marginTop: 4 } }, value),
+    sub && h('div', { style: { fontSize: 11, color: '#64748b', marginTop: 2 } }, sub)
+  );
+}
+
+// ── Pages ─────────────────────────────────────────────────────────────────────
+
+function Overview({ data }) {
+  if (!data) return h('div', { style: { padding: 24, color: '#64748b' } }, 'Loading...');
+  const s = data.state || {};
+  const xau_wr = s.best_xauusd_wr_real || s.best_xauusd_wr || 0;
+  const agg_wr = s.best_wr || 0;
+  const iter   = s.iteration || 0;
+  const trades = s.total_test_trades || 0;
+  const skills = data.skills?.total_skills_learned || 0;
+  const no_imp = s.no_improvement_count || 0;
+
+  return h('div', { style: { padding: 24 } },
+    h('div', { className: 'grid4', style: { marginBottom: 16 } },
+      h(MetricCard, { label: 'XAUUSD WR (Realistic)', value: pct(xau_wr), color: xau_wr >= 0.8 ? '#10b981' : xau_wr >= 0.65 ? '#3b82f6' : '#f59e0b' }),
+      h(MetricCard, { label: 'Aggregate WR', value: pct(agg_wr), color: '#3b82f6' }),
+      h(MetricCard, { label: 'Evolution Iteration', value: fmtN(iter), color: '#94a3b8' }),
+      h(MetricCard, { label: 'Total Test Trades', value: fmtN(trades), color: '#94a3b8' }),
+    ),
+    h('div', { className: 'grid4', style: { marginBottom: 24 } },
+      h(MetricCard, { label: 'Skills Learned', value: fmtN(skills), color: '#10b981' }),
+      h(MetricCard, { label: 'No-Improve Count', value: fmtN(no_imp), color: no_imp > 100 ? '#ef4444' : '#94a3b8', sub: no_imp > 100 ? 'Random restart imminent' : null }),
+      h(MetricCard, { label: 'Target', value: '80% WR', sub: 'Continuing beyond target', color: '#f59e0b' }),
+      h(MetricCard, { label: 'Distance to 80%', value: pct(Math.max(0, 0.80 - xau_wr)), color: '#94a3b8' }),
+    ),
+    h('div', { className: 'grid2' },
+      h(WRGauge, { wr: xau_wr }),
+      h(RecentActivity, { alerts: data.alerts || [] }),
+    )
+  );
+}
+
+function WRGauge({ wr }) {
+  const pct_val = Math.round(wr * 100);
+  const color   = wr >= 0.8 ? '#10b981' : wr >= 0.65 ? '#3b82f6' : '#f59e0b';
+  return h('div', { className: 'card' },
+    h('div', { className: 'section-title' }, 'XAUUSD Win Rate Progress'),
+    h('div', { style: { textAlign: 'center', padding: '20px 0' } },
+      h('div', { style: { fontSize: 56, fontWeight: 700, color } }, pct_val + '%'),
+      h('div', { style: { color: '#64748b', marginTop: 4 } }, 'Realistic Win Rate'),
+      h('div', { style: { marginTop: 16, padding: '0 16px' } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 4 } },
+          h('span', { style: { color: '#64748b', fontSize: 11 } }, '0%'),
+          h('span', { style: { color, fontSize: 11, fontWeight: 600 } }, 'TARGET: 80%'),
+          h('span', { style: { color: '#64748b', fontSize: 11 } }, '100%')
+        ),
+        h('div', { className: 'progress-bar' },
+          h('div', { className: 'progress-fill', style: { width: pct_val + '%', background: color } })
+        )
+      ),
+      h('div', { style: { marginTop: 12, display: 'flex', justifyContent: 'center', gap: 16 } },
+        wr >= 0.8 ? h('span', { className: 'badge badge-green' }, '✓ TARGET REACHED — EVOLVING BEYOND') :
+        h('span', { className: 'badge badge-amber' }, '⏳ Evolving toward 80%')
+      )
+    )
+  );
+}
+
+function RecentActivity({ alerts }) {
+  return h('div', { className: 'card' },
+    h('div', { className: 'section-title' },
+      h('span', { className: 'live-dot' }),
+      'Live Activity'
+    ),
+    h('div', { className: 'scrollable' },
+      alerts.length === 0
+        ? h('div', { style: { color: '#64748b', padding: '20px 0', textAlign: 'center' } }, 'No recent activity')
+        : alerts.slice().reverse().slice(0, 20).map((a, i) =>
+            h('div', { key: i, style: { padding: '8px 0', borderBottom: '1px solid #1e293b' } },
+              h('div', { style: { color: '#94a3b8', fontSize: 11 } }, a.time || ''),
+              h('div', { style: { marginTop: 2 } }, a.message || a)
+            )
+          )
+    )
+  );
+}
+
+function PairRankings({ data }) {
+  const per_pair = data?.state?.best_wr_per_pair || {};
+  const pairs = Object.entries(per_pair)
+    .map(([pair, wr]) => ({ pair, wr }))
+    .sort((a, b) => b.wr - a.wr);
+
+  return h('div', { style: { padding: 24 } },
+    h('div', { className: 'card' },
+      h('div', { className: 'section-title' }, 'Pair Rankings — Best Realistic WR'),
+      h('table', null,
+        h('thead', null,
+          h('tr', null,
+            h('th', null, '#'),
+            h('th', null, 'Pair'),
+            h('th', null, 'Best WR'),
+            h('th', null, 'vs Target'),
+            h('th', null, 'Progress'),
+            h('th', null, 'Status'),
+          )
+        ),
+        h('tbody', null,
+          pairs.length === 0
+            ? h('tr', null, h('td', { colSpan: 6, style: { textAlign: 'center', color: '#64748b', padding: 24 } }, 'No pair data yet'))
+            : pairs.map(({ pair, wr }, i) => {
+                const color = wr >= 0.8 ? '#10b981' : wr >= 0.65 ? '#3b82f6' : wr >= 0.5 ? '#f59e0b' : '#ef4444';
+                const badge = wr >= 0.8 ? h('span', { className: 'badge badge-green' }, '≥80%') :
+                              wr >= 0.65 ? h('span', { className: 'badge badge-blue' }, '≥65%') :
+                              wr >= 0.5  ? h('span', { className: 'badge badge-amber' }, '≥50%') :
+                              h('span', { className: 'badge badge-red' }, '<50%');
+                return h('tr', { key: pair },
+                  h('td', { style: { color: '#64748b' } }, i + 1),
+                  h('td', { style: { fontWeight: 600 } }, pair),
+                  h('td', { style: { color, fontWeight: 700 } }, pct(wr)),
+                  h('td', { style: { color: '#64748b' } }, wr >= 0.8 ? '+' + pct(wr - 0.8) : '-' + pct(0.8 - wr)),
+                  h('td', { style: { width: 120 } },
+                    h('div', { className: 'progress-bar' },
+                      h('div', { className: 'progress-fill', style: { width: Math.min(100, wr * 100) + '%', background: color } })
+                    )
+                  ),
+                  h('td', null, badge),
+                );
+              })
+        )
+      )
+    )
+  );
+}
+
+function AIMetrics({ data }) {
+  const ml = data?.ml || {};
+  return h('div', { style: { padding: 24 } },
+    h('div', { className: 'grid2', style: { marginBottom: 16 } },
+      h('div', { className: 'card' },
+        h('div', { className: 'section-title' }, 'ML Ensemble Status'),
+        h('div', { className: 'grid2' },
+          h('div', { className: 'card2' },
+            h('div', { className: 'metric-label' }, 'Trained'),
+            h('div', { style: { fontSize: 20, fontWeight: 700, color: ml.trained ? '#10b981' : '#ef4444' } },
+              ml.trained ? 'YES' : 'NO'
+            )
+          ),
+          h('div', { className: 'card2' },
+            h('div', { className: 'metric-label' }, 'Training Trades'),
+            h('div', { style: { fontSize: 20, fontWeight: 700, color: '#3b82f6' } },
+              fmtN(ml.n_train || 0)
+            )
+          ),
+          h('div', { className: 'card2' },
+            h('div', { className: 'metric-label' }, 'Threshold'),
+            h('div', { style: { fontSize: 20, fontWeight: 700, color: '#f59e0b' } },
+              ml.threshold ? pct(ml.threshold) : '0.55'
+            )
+          ),
+          h('div', { className: 'card2' },
+            h('div', { className: 'metric-label' }, 'Models Active'),
+            h('div', { style: { fontSize: 20, fontWeight: 700, color: '#94a3b8' } },
+              (ml.models || []).length || 0
+            )
+          ),
+        ),
+        ml.models && ml.models.length > 0 && h('div', { style: { marginTop: 12, display: 'flex', gap: 6 } },
+          ml.models.map(m => h('span', { key: m, className: 'badge badge-blue' }, m))
+        ),
+        ml.last_trained && h('div', { style: { marginTop: 8, color: '#64748b', fontSize: 11 } },
+          'Last trained: ' + ml.last_trained
+        )
+      ),
+      h('div', { className: 'card' },
+        h('div', { className: 'section-title' }, 'Skills Library'),
+        h('div', null,
+          h('div', { style: { fontSize: 36, fontWeight: 700, color: '#10b981' } },
+            fmtN(data?.skills?.total_skills_learned || 0)
+          ),
+          h('div', { style: { color: '#64748b' } }, 'Total skills learned'),
+        ),
+        h('div', { style: { marginTop: 12, color: '#64748b', fontSize: 12 } },
+          'Last updated: ' + (data?.skills?.last_updated || 'Never')
+        )
+      )
+    ),
+    h('div', { className: 'card' },
+      h('div', { className: 'section-title' }, 'ML New Subsystem'),
+      h('div', { className: 'grid3' },
+        MLModelCard('Pattern Classifier', 'XGBoost', 'weekly'),
+        MLModelCard('Regime Detector', 'LightGBM', 'daily'),
+        MLModelCard('LSTM Predictor', 'PyTorch', 'weekly'),
+      )
+    )
+  );
+}
+
+function MLModelCard(name, tech, schedule) {
+  return h('div', { className: 'card2', key: name },
+    h('div', { style: { fontWeight: 600, marginBottom: 4 } }, name),
+    h('div', { style: { color: '#64748b', fontSize: 12, marginBottom: 8 } }, tech + ' · retrain ' + schedule),
+    h('span', { className: 'badge badge-amber' }, 'Pending data'),
+  );
+}
+
+function SkillsLibrary({ data }) {
+  const per_pair = data?.skills?.per_pair || {};
+  const pairs = Object.entries(per_pair)
+    .map(([p, s]) => ({ pair: p, wr: s.wr, rrr: s.rrr, score: s.score, learned_at: s.learned_at }))
+    .sort((a, b) => b.wr - a.wr);
+  const regime_skills = data?.skills?.regime_skills || {};
+  const session_skills = data?.skills?.session_skills || {};
+
+  return h('div', { style: { padding: 24 } },
+    h('div', { className: 'grid2', style: { marginBottom: 16 } },
+      h('div', { className: 'card' },
+        h('div', { className: 'section-title' }, 'Per-Pair Skills'),
+        h('table', null,
+          h('thead', null, h('tr', null,
+            h('th', null, 'Pair'), h('th', null, 'WR'), h('th', null, 'RRR'),
+            h('th', null, 'Score'), h('th', null, 'Learned')
+          )),
+          h('tbody', null,
+            pairs.length === 0
+              ? h('tr', null, h('td', { colSpan: 5, style: { textAlign: 'center', color: '#64748b', padding: 16 } }, 'No skills yet'))
+              : pairs.map(p => h('tr', { key: p.pair },
+                  h('td', { style: { fontWeight: 600 } }, p.pair),
+                  h('td', { style: { color: '#10b981' } }, pct(p.wr)),
+                  h('td', null, fmt2(p.rrr)),
+                  h('td', { style: { color: '#64748b' } }, fmt2(p.score)),
+                  h('td', { style: { color: '#64748b', fontSize: 11 } }, (p.learned_at || '').slice(0, 10))
+                ))
+          )
+        )
+      ),
+      h('div', { className: 'card' },
+        h('div', { className: 'section-title' }, 'Regime & Session Skills'),
+        Object.entries({ ...regime_skills, ...session_skills }).map(([k, v]) =>
+          h('div', { key: k, style: { display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #1e293b' } },
+            h('div', null, k.replace(/_/g, ' ')),
+            v
+              ? h('div', { style: { color: '#10b981' } }, 'WR ' + pct(v.wr))
+              : h('span', { className: 'badge badge-amber' }, 'Not learned')
+          )
+        )
+      )
+    )
+  );
+}
+
+function EvolutionHistory({ data }) {
+  const alerts = (data?.alerts || []).map((a, i) => ({
+    i, msg: a.message || a, time: a.time || ''
+  }));
+
+  return h('div', { style: { padding: 24 } },
+    h('div', { className: 'card' },
+      h('div', { className: 'section-title' }, 'Evolution Log'),
+      h('div', { className: 'scrollable', style: { maxHeight: 600 } },
+        alerts.length === 0
+          ? h('div', { style: { textAlign: 'center', color: '#64748b', padding: 40 } }, 'No history yet')
+          : alerts.slice().reverse().map(a =>
+              h('div', { key: a.i, style: { padding: '8px 0', borderBottom: '1px solid #1e293b', fontSize: 13 } },
+                h('span', { style: { color: '#475569', fontSize: 11, marginRight: 8 } }, a.time),
+                a.msg
+              )
+            )
+      )
+    )
+  );
+}
+
+function MonteCarloPanel({ data }) {
+  const mc = data?.state?.monte_carlo || {};
+  return h('div', { style: { padding: 24 } },
+    h('div', { className: 'grid2', style: { marginBottom: 16 } },
+      h('div', { className: 'card' },
+        h('div', { className: 'section-title' }, 'Monte Carlo Results'),
+        mc.pass_rate != null
+          ? h('div', null,
+              h('div', { style: { fontSize: 48, fontWeight: 700, color: mc.passed ? '#10b981' : '#ef4444' } },
+                pct(mc.pass_rate)
+              ),
+              h('div', { style: { color: '#64748b' } }, 'Monte Carlo Pass Rate'),
+              h('div', { style: { marginTop: 12 } },
+                h('span', { className: mc.passed ? 'badge badge-green' : 'badge badge-red' },
+                  mc.passed ? '✓ PASSED' : '✗ FAILED'
+                )
+              )
+            )
+          : h('div', { style: { color: '#64748b', padding: '20px 0' } }, 'No Monte Carlo data yet')
+      ),
+      h('div', { className: 'card' },
+        h('div', { className: 'section-title' }, 'FTMO Simulation'),
+        h('div', { style: { color: '#64748b', padding: '20px 0' } }, 'Run from evolution loop — data in state file')
+      )
+    )
+  );
+}
+
+function HealerLog({ data }) {
+  const fixes = data?.healer_fixes || 0;
+  return h('div', { style: { padding: 24 } },
+    h('div', { className: 'card' },
+      h('div', { className: 'section-title' }, 'System Healer Activity'),
+      h('div', { style: { fontSize: 48, fontWeight: 700, color: '#3b82f6' } }, fmtN(fixes)),
+      h('div', { style: { color: '#64748b' } }, 'Auto-fixes applied this session'),
+    )
+  );
+}
+
+// ── App shell ─────────────────────────────────────────────────────────────────
+
+const PAGES = [
+  { id: 'overview',   label: 'Overview' },
+  { id: 'pairs',      label: 'Pair Rankings' },
+  { id: 'ai',         label: 'AI Metrics' },
+  { id: 'skills',     label: 'Skills Library' },
+  { id: 'history',    label: 'Evolution History' },
+  { id: 'montecarlo', label: 'Monte Carlo' },
+  { id: 'healer',     label: 'Healer Log' },
+];
+
+function App() {
+  const [page, setPage]   = useState('overview');
+  const [data, setData]   = useState(null);
+  const [lastUpdate, setLastUpdate] = useState(null);
+
+  const loadData = useCallback(async () => {
+    const [state, alerts, skills, ml] = await Promise.all([
+      fetchAPI('/api/state'),
+      fetchAPI('/api/alerts'),
+      fetchAPI('/api/skills'),
+      fetchAPI('/api/ml'),
+    ]);
+    setData({ state: state || {}, alerts: alerts || [], skills: skills || {}, ml: ml || {} });
+    setLastUpdate(new Date().toLocaleTimeString());
+  }, []);
+
+  useEffect(() => {
+    loadData();
+    const iv = setInterval(loadData, 15000);  // refresh every 15s
+    return () => clearInterval(iv);
+  }, [loadData]);
+
+  const renderPage = () => {
+    switch (page) {
+      case 'overview':   return h(Overview, { data });
+      case 'pairs':      return h(PairRankings, { data });
+      case 'ai':         return h(AIMetrics, { data });
+      case 'skills':     return h(SkillsLibrary, { data });
+      case 'history':    return h(EvolutionHistory, { data });
+      case 'montecarlo': return h(MonteCarloPanel, { data });
+      case 'healer':     return h(HealerLog, { data });
+      default:           return h(Overview, { data });
+    }
+  };
+
+  return h('div', null,
+    h('nav', { className: 'nav' },
+      h('div', { className: 'nav-logo' }, '⚡ AutoTrader'),
+      PAGES.map(p =>
+        h('button', {
+          key: p.id,
+          className: 'nav-btn' + (page === p.id ? ' active' : ''),
+          onClick: () => setPage(p.id),
+        }, p.label)
+      ),
+      h('div', { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 } },
+        h('span', { className: 'live-dot' }),
+        h('span', { style: { color: '#64748b', fontSize: 12 } }, lastUpdate ? 'Updated ' + lastUpdate : 'Loading...')
+      )
+    ),
+    renderPage()
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body>
+</html>
