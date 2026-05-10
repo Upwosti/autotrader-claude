@@ -1172,6 +1172,12 @@ class AutoTraderEngine:
 
                 if now - self._last_6h >= 21600:
                     github_sync(self.iteration, self.xauusd_best_wr)
+                    # Notion sync every 2 hours (batched, not per-trade)
+                    try:
+                        from reporting.notion_sync import run_full_sync
+                        threading.Thread(target=run_full_sync, daemon=True).start()
+                    except Exception:
+                        pass
                     self._last_6h = now
 
                 if now - self._last_24h >= 86400:
