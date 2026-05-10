@@ -295,6 +295,13 @@ class AutoTraderEngine:
 
         while True:
             try:
+                # Resource check every 10 iterations
+                if self._resource_mon and self.iteration % 10 == 0:
+                    snap = self._resource_mon.check()
+                    if snap.status == "critical":
+                        logger.warning("[ENGINE] Resource critical — sleeping 30s")
+                        time.sleep(30)
+
                 self.evolve_one_iteration()
                 self.save_state()
                 self.iteration += 1

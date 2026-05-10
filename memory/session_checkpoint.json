@@ -1,6 +1,6 @@
 {
   "session_timestamp": "2026-05-10T00:00:00Z",
-  "architecture_version": "5.0",
+  "architecture_version": "5.1",
   "completed_tasks": [
     "Phase 1: Full codebase audit complete (92 Python files, 17,793 LOC)",
     "Phase 1: system_map.json generated",
@@ -24,16 +24,22 @@
     "Phase 3: reporting/monthly_reports/ directory populated",
     "GitHub: Repository initialized at Upwosti/autotrader-claude (master)",
     "GitHub: Engine auto-sync working (every 10 iterations)",
+    "LIVE UPGRADE Phase 1: reporting/real_backtest_reporter.py — true candle replay via WalkForwardBacktester",
+    "LIVE UPGRADE Phase 2: execution/live_execution_guard.py — MT5 reconciliation, retry×3, spread filter",
+    "LIVE UPGRADE Phase 3: analytics/live_drift_monitor.py — WR/RR drift tracking, auto risk halving",
+    "LIVE UPGRADE Phase 4: portfolio/live_exposure_engine.py — 6 correlation clusters, USD/metals/crypto limits",
+    "LIVE UPGRADE Phase 5: risk/news_volatility_filter.py — ATR spike + spread spike + ForexFactory calendar",
+    "LIVE UPGRADE Phase 6: validation/walk_forward_validator.py — OOS validation, Monte Carlo, robustness",
+    "LIVE UPGRADE Phase 7: execution/paper_trading.py — paper fill engine, live-transition gate",
+    "LIVE UPGRADE Phase 8: core/resource_monitor.py — 8GB RAM enforcement, lazy loading, pair-by-pair",
+    "LIVE UPGRADE: All 8 engines wired into run_forever.py (lazy-init, daemon threads, scheduler hooks)",
     "Telegram: HANDOVER COMPLETE message sent",
     "Watchdog: Running (PID chain: venv launcher → system Python watchdog → engine)"
   ],
   "pending_tasks": [
     "Phase 3: Add NOTION_TOKEN + NOTION_DATABASE_ID to .env when user creates Notion integration",
-    "Phase 4: Walk-forward validation report for all 19 pairs",
-    "Phase 4: Monte Carlo 1000-iteration survival analysis",
-    "Phase 4: Parameter sensitivity analysis",
-    "Phase 5: MT5 live trading activation (needs MT5_LOGIN, MT5_PASSWORD, MT5_SERVER in .env)",
-    "Phase 5: Demo mode 4 weeks before FTMO challenge",
+    "MT5 live activation: Add MT5_LOGIN, MT5_PASSWORD, MT5_SERVER to .env",
+    "Paper trading: Run 2-4 weeks paper phase before going live",
     "Scheduled: Sunday self-evolution review (already in scheduler)",
     "Scheduled: Monthly report email (already in scheduler)"
   ],
@@ -41,7 +47,7 @@
   "resource_state": {
     "ram_avg_mb": 128,
     "cpu_avg_percent": 35,
-    "disk_mb": 82,
+    "disk_mb": 95,
     "status": "healthy"
   },
   "engine_state": {
@@ -52,7 +58,7 @@
     "pid": "active"
   },
   "architecture_notes": {
-    "main_engine": "run_forever.py — AutoTraderEngine v5.0, single autonomous class",
+    "main_engine": "run_forever.py — AutoTraderEngine v5.1, single autonomous class",
     "scheduler": "Built into run_forever.py (30min/2h/6h/24h + UTC time-of-day tasks)",
     "state": "local_db/engine_state.json (primary) + local_db/auto_loop_state.json (legacy watchdog compat)",
     "github": "Upwosti/autotrader-claude, auto-commits every 10 iterations",
@@ -61,10 +67,17 @@
     "smart_exit": "execution/smart_exit_engine.py — 6-priority exit hierarchy",
     "intelligent_sl": "risk/intelligent_sl_engine.py — structure-aware, avoids round numbers",
     "notion": "reporting/notion_sync.py — requires NOTION_TOKEN in .env",
-    "sqlite": "data/autotrader.db — 6 tables (trades, events, performance_daily, evolution, resource, pair_personality)"
+    "sqlite": "data/autotrader.db — 6 tables (trades, events, performance_daily, evolution, resource, pair_personality)",
+    "live_execution_guard": "execution/live_execution_guard.py — duplicate prevention, MT5 reconciliation, retry×3",
+    "live_drift_monitor": "analytics/live_drift_monitor.py — evaluates all pairs every 2h, halves risk on drift >15pp",
+    "live_exposure_engine": "portfolio/live_exposure_engine.py — cluster conflict + USD cap + inverse pair warnings",
+    "news_volatility_filter": "risk/news_volatility_filter.py — ATR/spread/sigma spike + ForexFactory calendar",
+    "walk_forward_validator": "validation/walk_forward_validator.py — OOS validation every 6h, MC survival ≥70%",
+    "paper_trading": "execution/paper_trading.py — mandatory paper phase, live gate after 14 days + 20 trades",
+    "resource_monitor": "core/resource_monitor.py — warns at 6GB, purges at 7GB, emergency at 7.5GB"
   },
-  "next_priority": "Monitor XAUUSD WR progression toward 85%; activate Notion when token provided; MT5 demo when credentials ready",
-  "resume_plan": "Check engine logs, verify XAUUSD WR trajectory, run Phase 4 validation if WR stable above 80%",
+  "next_priority": "Monitor XAUUSD WR progression toward 85%; run paper trading phase; activate MT5 demo when credentials ready",
+  "resume_plan": "Check engine logs for drift/validation alerts; review paper trading performance after 2 weeks; promote to live if all gates pass",
   "unfinished_files": [],
   "token_interrupted": false
 }
