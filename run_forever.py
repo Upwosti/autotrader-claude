@@ -260,6 +260,16 @@ class AutoTraderEngine:
         self._wf_cls   = None   # WalkForwardBacktester class
         self._tp_cls   = None   # TrendParams class
 
+        # --- Phase 3-8 engines (lazy-init) ---
+        self._drift_monitor   = None   # analytics.live_drift_monitor.LiveDriftMonitor
+        self._exposure_engine = None   # portfolio.live_exposure_engine.LiveExposureEngine
+        self._news_filter     = None   # risk.news_volatility_filter.NewsVolatilityFilter
+        self._paper_engine    = None   # execution.paper_trading.PaperTradingEngine
+        self._wf_validator    = None   # validation.walk_forward_validator.WalkForwardValidator
+        self._resource_mon    = None   # core.resource_monitor.ResourceMonitor
+        self._last_drift_check = 0.0
+        self._last_validation  = 0.0
+
     # ── Entry point ────────────────────────────────────────────────────────────
 
     def run_forever(self):
