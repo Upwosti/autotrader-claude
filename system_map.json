@@ -1,0 +1,83 @@
+{
+  "generated": "2026-05-10",
+  "engine_version": "5.0",
+  "modules": [
+    {"name": "run_forever.py", "role": "Main evolution engine", "status": "active", "lines": 1081},
+    {"name": "watchdog.py", "role": "Process monitor + auto-restart", "status": "active", "lines": 196},
+    {"name": "daily_routine_exec.py", "role": "Daily task executor (health/email/ranking)", "status": "active", "lines": 748},
+    {"name": "daily_report_runner.py", "role": "Scheduled report generator", "status": "active", "lines": 609},
+    {"name": "send_report.py", "role": "SMTP email sender", "status": "active", "lines": 184},
+    {"name": "config.py", "role": "Central config hub (API keys, pairs, params)", "status": "active", "lines": 139},
+    {"name": "main.py", "role": "CLI entry point (evolve/backtest/dashboard/live)", "status": "active", "lines": 313},
+    {"name": "auto_updater.py", "role": "Cloud param sync + strategy version pull", "status": "active", "lines": 250}
+  ],
+  "schedulers": [
+    {"name": "run_forever.py internal", "type": "builtin", "tasks": ["30min health", "2h telegram", "08:00 evolution email", "09:00 backtest email", "20:00 pair ranking", "22:00 FTMO check", "03:00 monthly backtest"], "status": "active"},
+    {"name": "evolution/scheduled_check.py", "type": "background daemon", "tasks": ["30min watchdog", "2h full check", "6h skill update", "24h stress test", "UTC time-of-day tasks"], "status": "active", "note": "Overlaps with run_forever.py scheduler — potential duplicate"},
+    {"name": "core/scheduler.py", "type": "APScheduler", "tasks": ["1h scan", "15min FTMO check", "Sunday 22:00 review"], "status": "active", "note": "Third scheduler — overlap with above two"},
+    {"name": "watchdog.py", "type": "subprocess monitor", "tasks": ["crash detection", "auto-restart", "30min perf check"], "status": "active"}
+  ],
+  "services": [
+    {"name": "Flask Dashboard", "file": "dashboard/app.py", "port": 5000, "status": "active"},
+    {"name": "MT5 Connector", "file": "core/mt5_connector.py", "status": "simulation_mode", "note": "MetaTrader5 package not installed — fallback to sim"},
+    {"name": "Supabase DB", "file": "database/supabase_client.py", "status": "active_with_json_fallback"},
+    {"name": "Telegram Bot", "file": "alerts/telegram_bot.py", "status": "active"},
+    {"name": "Email SMTP", "file": "alerts/email_alert.py", "status": "active"}
+  ],
+  "loops": [
+    {"name": "Evolution Loop", "file": "run_forever.py", "type": "tight_loop", "frequency": "2-3s per iteration", "status": "running"},
+    {"name": "Autonomous Loop", "file": "evolution/autonomous_loop.py", "type": "tight_loop", "note": "Duplicate of run_forever.py — legacy version"},
+    {"name": "Scheduled Checker", "file": "evolution/scheduled_check.py", "type": "daemon_60s_tick", "status": "loaded_by_run_forever"}
+  ],
+  "databases": [
+    {"name": "Supabase (cloud)", "tables": ["strategy_versions", "backtest_runs", "trades", "system_state"], "status": "active_fallback"},
+    {"name": "Local JSON", "path": "local_db/", "files": ["engine_state.json", "auto_loop_state.json", "evolution_log.json", "trades.json", "backtest_runs.json", "strategy_versions.json", "skills.json", "system_state.json", "strategy_weights.json"], "status": "primary"},
+    {"name": "SQLite", "path": "data/autotrader.db", "status": "NOT_YET_CREATED", "note": "Required by master prompt — needs creation"}
+  ],
+  "reporting_systems": [
+    {"name": "Daily Evolution Report", "file": "reports/evolution_report.py", "frequency": "every 1000 trades", "status": "active"},
+    {"name": "Mini Report", "file": "reports/mini_report.py", "frequency": "every 100 trades", "status": "active"},
+    {"name": "Final Report", "file": "reports/final_report.py", "frequency": "manual", "status": "active"},
+    {"name": "Monthly Reports", "path": "reporting/monthly_reports/", "status": "NOT_YET_CREATED", "note": "HTML reports Jan 2022→present required"},
+    {"name": "Notion Sync", "file": "reporting/notion_sync.py", "status": "NOT_YET_CREATED"}
+  ],
+  "ram_hotspots": [
+    {"source": "yfinance data refresh", "note": "Full OHLC history loaded per pair per refresh — use rolling windows"},
+    {"source": "evolution_log.json", "size_kb": 440, "note": "Growing unbounded — needs rotation at 50MB"},
+    {"source": "system_state.json", "size_mb": 3.1, "note": "Acceptable currently, monitor growth"},
+    {"source": "ML ensemble (LSTM)", "note": "LSTM model loads 60-bar lookback into RAM per inference"}
+  ],
+  "cpu_hotspots": [
+    {"source": "WalkForwardBacktester", "note": "5-fold backtest per iteration — 2-3s per pair, acceptable"},
+    {"source": "ICT scorer (_apply_ict_filter)", "note": "FIXED: removed from mutation space — was causing 10min+ stalls"},
+    {"source": "Monthly backtest thread", "note": "912 WF backtests — FIXED: scheduled to 03:00 UTC only"},
+    {"source": "ML retrain (00:00 UTC)", "note": "LSTM retraining — background thread, monitor duration"}
+  ],
+  "duplicate_logic": [
+    {"description": "PAIRS list hardcoded in 6+ files", "files": ["run_forever.py", "config.py", "scheduled_check.py", "daily_routine_exec.py", "watchdog.py", "evolution/autonomous_loop.py"], "fix": "Use config.PAIRS as single source of truth"},
+    {"description": "Three overlapping schedulers", "files": ["run_forever.py", "evolution/scheduled_check.py", "core/scheduler.py"], "fix": "run_forever.py scheduler is canonical — others should defer"},
+    {"description": "Duplicate evolution loop", "files": ["run_forever.py", "evolution/autonomous_loop.py"], "fix": "run_forever.py is v5 canonical — autonomous_loop.py is legacy"},
+    {"description": "Risk checks duplicated", "files": ["risk/equity_protector.py", "risk/ftmo_guardian.py", "execution/trade_executor.py"], "fix": "Centralize via ftmo_guardian as single gatekeeper"}
+  ],
+  "dead_code": [
+    {"file": "database/postgresql_client.py", "reason": "Replaced by Supabase", "action": "archive"},
+    {"file": "database/redis_client.py", "reason": "Optional caching, not active", "action": "archive"},
+    {"file": "ml/reinforcement_agent.py", "reason": "Experimental, not integrated", "action": "archive"}
+  ],
+  "abandoned_systems": [
+    {"file": "evolution/autonomous_loop.py", "reason": "Legacy — run_forever.py v5 is the replacement", "action": "archive"}
+  ],
+  "conflicting_engines": [
+    {"description": "run_forever.py vs evolution/autonomous_loop.py", "note": "Both are evolution loops — autonomous_loop.py is the legacy version"},
+    {"description": "Three schedulers", "note": "run_forever.py built-in + scheduled_check.py + core/scheduler.py all schedule overlapping tasks"}
+  ],
+  "missing_per_master_prompt": [
+    "analytics/momentum_engine.py",
+    "execution/smart_exit_engine.py",
+    "risk/intelligent_sl_engine.py",
+    "reporting/notion_sync.py",
+    "reporting/monthly_reports/ (HTML Jan 2022-present)",
+    "data/autotrader.db (SQLite)",
+    "memory/session_checkpoint.json"
+  ]
+}
