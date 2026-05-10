@@ -1178,16 +1178,49 @@ class AutoTraderEngine:
 
                 if now - self._last_2h >= 7200:
                     self._send_telegram_report()
+                    # Drift monitor — every 2h
+                    if self._drift_monitor:
+                        try:
+                            threading.Thread(
+                                target=self._drift_monitor.evaluate_all_pairs,
+                                daemon=True,
+                            ).start()
+                        except Exception:
+                            pass
+                    # Paper trading evaluation — every 2h
+                    if self._paper_engine:
+                        try:
+                            threading.Thread(
+                                target=self._paper_engine.evaluate_readiness,
+                                daemon=True,
+                            ).start()
+                        except Exception:
+                            pass
                     self._last_2h = now
 
                 if now - self._last_6h >= 21600:
                     github_sync(self.iteration, self.xauusd_best_wr)
-                    # Notion sync every 2 hours (batched, not per-trade)
+                    # Notion sync
                     try:
                         from reporting.notion_sync import run_full_sync
                         threading.Thread(target=run_full_sync, daemon=True).start()
                     except Exception:
                         pass
+                    # Walk-forward validation — every 6h
+                    if self._wf_validator:
+                        try:
+                            threading.Thread(
+                                target=self._wf_validator.run_all_pairs,
+                                daemon=True,
+                            ).start()
+                        except Exception:
+                            pass
+                    # News filter cache refresh
+                    if self._news_filter:
+                        try:
+                            self._news_filter._last_news_fetch = 0.0  # force refresh
+                        except Exception:
+                            pass
                     self._last_6h = now
 
                 if now - self._last_24h >= 86400:
@@ -1273,6 +1306,49 @@ class AutoTraderEngine:
         except Exception as e:
             logger.critical(f"Cannot load core modules: {e}")
             raise
+
+        # Phase 3-8 engines — non-critical, load best-effort
+        try:
+            from analytics.live_drift_monitor import LiveDriftMonitor
+            self._drift_monitor = LiveDriftMonitor()
+            logger.info("LiveDriftMonitor loaded")
+        except Exception as e:
+            logger.debug(f"LiveDriftMonitor unavailable: {e}")
+
+        try:
+            from portfolio.live_exposure_engine import LiveExposureEngine
+            self._exposure_engine = LiveExposureEngine()
+            logger.info("LiveExposureEngine loaded")
+        except Exception as e:
+            logger.debug(f"LiveExposureEngine unavailable: {e}")
+
+        try:
+            from risk.news_volatility_filter import NewsVolatilityFilter
+            self._news_filter = NewsVolatilityFilter()
+            logger.info("NewsVolatilityFilter loaded")
+        except Exception as e:
+            logger.debug(f"NewsVolatilityFilter unavailable: {e}")
+
+        try:
+            from execution.paper_trading import PaperTradingEngine
+            self._paper_engine = PaperTradingEngine()
+            logger.info(f"PaperTradingEngine loaded — mode={self._paper_engine._state.mode}")
+        except Exception as e:
+            logger.debug(f"PaperTradingEngine unavailable: {e}")
+
+        try:
+            from validation.walk_forward_validator import WalkForwardValidator
+            self._wf_validator = WalkForwardValidator()
+            logger.info("WalkForwardValidator loaded")
+        except Exception as e:
+            logger.debug(f"WalkForwardValidator unavailable: {e}")
+
+        try:
+            from core.resource_monitor import ResourceMonitor
+            self._resource_mon = ResourceMonitor()
+            logger.info("ResourceMonitor loaded")
+        except Exception as e:
+            logger.debug(f"ResourceMonitor unavailable: {e}")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
