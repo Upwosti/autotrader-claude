@@ -463,6 +463,11 @@ class AutoTraderEngine:
 
         while True:
             try:
+                # Pause gate
+                if _engine_paused:
+                    time.sleep(5)
+                    continue
+
                 # Resource check every 10 iterations
                 if self._resource_mon and self.iteration % 10 == 0:
                     snap = self._resource_mon.check()
