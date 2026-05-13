@@ -614,6 +614,13 @@ class AutoTraderEngine:
         # Update skills
         self._update_skills(pair, params, result)
 
+        # Update expectancy engine
+        try:
+            from analytics.expectancy_engine import get_engine as _get_exp
+            _get_exp().update_from_result(pair, result)
+        except Exception:
+            pass
+
         # Update param momentum
         last_p = self.last_changed.get(pair)
         if last_p:
