@@ -1,6 +1,6 @@
 {
   "session_timestamp": "2026-05-10T00:00:00Z",
-  "architecture_version": "5.1",
+  "architecture_version": "5.2",
   "completed_tasks": [
     "Phase 1: Full codebase audit complete (92 Python files, 17,793 LOC)",
     "Phase 1: system_map.json generated",

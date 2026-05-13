@@ -1,5 +1,16 @@
 # Resource Analysis — AutoTrader Claude
-Generated: 2026-05-10 | Engine: v5.0 | Iter: 92,700+ | XAUUSD WR: 81.1%
+Generated: 2026-05-13 | Engine: v5.2 | Iter: 101,790+ | XAUUSD WR: 81.1%
+
+## Session Fixes Applied
+| Issue | Fix | Impact |
+|---|---|---|
+| Engine DOWN | Restarted watchdog | Critical |
+| git push HEAD:main | Changed to HEAD:master | Fixes auto-sync |
+| Supabase WARNING spam | Demoted to DEBUG | Clean logs |
+| Email duplicates | email_tracker.json dedup | Prevents spam |
+| Score = WR×RRR | Score = WR×RRR - rr_penalty | Pushes toward RR≥1.5 |
+| No regime awareness | market_regime_engine.py | 8 regime classifications |
+| No Telegram commands | /status /pause /resume etc | Full remote control |
 
 ## Current RAM Usage
 
