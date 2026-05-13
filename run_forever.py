@@ -519,35 +519,46 @@ class AutoTraderEngine:
         return weighted[self.iteration % len(weighted)]
 
     def is_better(self, pair: str, result: dict) -> bool:
-        """Iron rules — all must pass."""
+        """OMEGA rules: expectancy-first, asymmetric payoff."""
         wr     = result.get("win_rate", 0)
         rrr    = result.get("avg_rrr", 0)
         trades = result.get("trades", 0)
+        dd     = result.get("max_drawdown", 0)
 
         if trades < 15:
             logger.debug(f"[{pair}] REJECT: trades={trades} < 15")
             return False
 
+        # Absolute WR floor — allow trading WR for RR
+        if wr < MIN_WR_FLOOR:
+            logger.debug(f"[{pair}] REJECT: wr={wr:.1%} < min_floor {MIN_WR_FLOOR:.0%}")
+            return False
+
+        # RRR floor — must achieve minimum realized RR
         if rrr < RRR_FLOOR:
             logger.debug(f"[{pair}] REJECT: rrr={rrr:.3f} < floor {RRR_FLOOR}")
             return False
 
-        # Rule 1: WR floor — never go below best ever achieved (3% tolerance)
-        wr_floor = self.best_wr.get(pair, 0) * 0.97
-        if wr < wr_floor:
-            logger.debug(f"[{pair}] REJECT: wr={wr:.1%} < floor {wr_floor:.1%}")
+        # Drawdown cap 8%
+        if dd > 0.08:
+            logger.debug(f"[{pair}] REJECT: dd={dd:.1%} > 8%")
             return False
 
-        # Rule 3: expectancy must improve (E = WR*AvgWin - (1-WR)*AvgLoss)
-        # Penalty if RR < 1.5 to push toward higher-RR systems
-        rr_penalty = max(0.0, (1.5 - rrr) * 0.1)
-        score = wr * min(rrr, 5.0) - rr_penalty
+        # OMEGA primary metric: expectancy = WR*avgWin - (1-WR)*avgLoss
+        # avgLoss assumed = 1R; avgWin = rrr (avg realized R per winner)
+        expectancy = wr * rrr - (1 - wr)
+        if expectancy <= 0:
+            logger.debug(f"[{pair}] REJECT: expectancy={expectancy:.4f} <= 0")
+            return False
+
+        # Score: expectancy + RR bonus (rewards asymmetric payoff)
+        score = expectancy + max(0.0, rrr - 1.5) * 0.05
         cur_best = self.best_score.get(pair, 0)
         if score <= cur_best:
             logger.debug(f"[{pair}] REJECT: score={score:.4f} <= best {cur_best:.4f}")
             return False
 
-        # Monte Carlo: reject if survival < 70%
+        # Monte Carlo survival
         mc_pass = result.get("monte_carlo_pass_rate", 1.0)
         if mc_pass < MONTE_MIN:
             logger.debug(f"[{pair}] REJECT: mc_pass={mc_pass:.2f} < {MONTE_MIN}")
@@ -558,8 +569,8 @@ class AutoTraderEngine:
     def accept(self, pair: str, params: dict, result: dict):
         wr    = result.get("win_rate", 0)
         rrr   = result.get("avg_rrr", 0)
-        rr_penalty = max(0.0, (1.5 - rrr) * 0.1)
-        score = wr * min(rrr, 5.0) - rr_penalty
+        expectancy = wr * rrr - (1 - wr)
+        score = expectancy + max(0.0, rrr - 1.5) * 0.05
 
         self.best_wr[pair]     = max(self.best_wr.get(pair, 0), wr)
         self.best_rrr[pair]    = max(self.best_rrr.get(pair, 0), rrr)
