@@ -78,7 +78,7 @@ STUCK_STRATEGY = 100  # new strategy type threshold
 GITHUB_EVERY  = 10    # sync every N iterations
 REPORT_EVERY  = 100   # full ranking report interval
 MONTE_N       = 1000  # Monte Carlo shuffles
-MONTE_MIN     = 0.70  # min survival rate
+MONTE_MIN     = 0.65  # min MC survival rate (OMEGA spec: 65%)
 
 # ── Pairs ──────────────────────────────────────────────────────────────────────
 PAIRS = [
