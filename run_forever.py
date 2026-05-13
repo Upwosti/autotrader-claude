@@ -737,17 +737,28 @@ class AutoTraderEngine:
     def _new_strategy_type(self, pair: str):
         """Try a completely different parameter configuration after 100 stuck iters."""
         logger.info(f"NEW STRATEGY TYPE [{pair}] after {STUCK_STRATEGY} stuck iters")
+        # OMEGA strategy templates — all target asymmetric payoff
         strategies = [
-            {"tp_rrr": 3.0, "sl_atr_mult": 1.0, "min_confluence": 3,
-             "use_ema_stack": True, "use_pattern": True, "use_adx_filter": True,
-             "rsi_long_min": 35.0, "rsi_long_max": 65.0},
-            {"tp_rrr": 2.0, "sl_atr_mult": 0.5, "min_confluence": 2,
-             "use_ema_stack": False, "use_pattern": True, "use_adx_filter": False,
-             "use_ict_filter": True, "ict_min_score": 40},
-            {"tp_rrr": 4.0, "sl_atr_mult": 1.5, "min_confluence": 4,
+            # Momentum runner: wide TP, wide trail, small partial
+            {"tp_rrr": 6.0, "trail_atr_mult": 3.0, "partial_pct_1r": 0.10,
+             "sl_atr_mult": 1.0, "min_confluence": 3,
+             "use_ema_stack": True, "use_adx_filter": True, "use_expansion": True},
+            # Breakout with runner
+            {"tp_rrr": 5.0, "trail_atr_mult": 2.5, "partial_pct_1r": 0.25,
+             "sl_atr_mult": 0.75, "min_confluence": 3,
+             "use_ema_stack": True, "use_weekly_filter": True, "use_pattern": True},
+            # Swing trade, patient
+            {"tp_rrr": 4.0, "trail_atr_mult": 2.0, "partial_pct_1r": 0.25,
+             "sl_atr_mult": 1.0, "min_confluence": 4,
              "use_ema_stack": True, "use_weekly_filter": True, "use_expansion": True},
-            {"tp_rrr": 1.5, "sl_atr_mult": 0.3, "min_confluence": 3,
-             "use_pattern": True, "use_ict_filter": True, "ict_min_score": 50},
+            # Aggressive runner, no partial
+            {"tp_rrr": 8.0, "trail_atr_mult": 4.0, "partial_pct_1r": 0.0,
+             "sl_atr_mult": 1.5, "min_confluence": 3,
+             "use_adx_filter": True, "use_weekly_filter": True},
+            # Conservative: moderate RR, clean entries
+            {"tp_rrr": 3.0, "trail_atr_mult": 2.0, "partial_pct_1r": 0.25,
+             "sl_atr_mult": 0.5, "min_confluence": 4,
+             "use_ema_stack": True, "use_pattern": True},
         ]
         template = random.choice(strategies)
         new = self._default_params(pair)
