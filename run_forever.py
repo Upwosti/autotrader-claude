@@ -345,8 +345,27 @@ def _handle_command(cmd: str, engine) -> str:
             return "\n".join(lines)
         elif cmd == "/close_all":
             return "CLOSE_ALL: No live MT5 positions active (demo mode). Use MT5 terminal."
+        elif cmd == "/cpu":
+            try:
+                import psutil
+                cpu = psutil.cpu_percent(interval=1)
+                return f"CPU: {cpu:.1f}%"
+            except Exception:
+                return "CPU: psutil not available"
+        elif cmd == "/iter":
+            return f"Iteration: {engine.iteration:,}"
+        elif cmd == "/restart":
+            _engine_paused = False
+            return "Engine unpaused. Watchdog will restart if needed."
+        elif cmd == "/safemode":
+            _engine_paused = True
+            return ("SAFE MODE ACTIVE\n"
+                    "Engine paused. No new iterations.\n"
+                    "Use /resume to exit safe mode.")
         else:
-            return f"Unknown: {cmd}\nCommands: /status /pause /resume /report /best /ram /audit /risk /close_all"
+            return (f"Commands: /status /pause /resume /stop /close_all\n"
+                    f"/report /best /ram /cpu /iter /audit /risk\n"
+                    f"/restart /safemode")
     except Exception as e:
         return f"Command error: {e}"
 
@@ -699,23 +718,24 @@ class AutoTraderEngine:
         if sk and isinstance(sk, dict) and "params" in sk:
             return copy.deepcopy(sk["params"])
 
-        # Default
+        # OMEGA default — asymmetric payoff profile
         return {
             "ema_fast": 21, "ema_slow": 89, "ema_long": 200,
             "ema_weekly": 26, "atr_period": 14,
-            "sl_atr_mult": 0.5, "tp_rrr": 2.5,
-            "min_adx": 25.0,
+            "sl_atr_mult": 0.75, "tp_rrr": 4.0,
+            "trail_atr_mult": 2.5, "partial_pct_1r": 0.25,
+            "min_adx": 20.0,
             "rsi_long_min": 30.0, "rsi_long_max": 68.0,
             "rsi_short_min": 32.0, "rsi_short_max": 65.0,
             "pullback_atr_mult": 2.0, "min_vol_ratio": 0.7,
-            "use_weekly_filter": False, "use_ema_stack": False,
+            "use_weekly_filter": True, "use_ema_stack": False,
             "use_pattern": True, "use_pullback_zone": False,
             "use_adx_filter": True, "use_volume_filter": False,
-            "use_expansion": False, "use_ict_filter": False,
+            "use_expansion": True, "use_ict_filter": False,
             "ict_min_score": 40,
-            "min_hold_bars": 2, "min_confluence": 2,
+            "min_hold_bars": 1, "min_confluence": 3,
             "version": 1, "strategy_name": "HighConfluenceTrend",
-            "notes": "Default",
+            "notes": "OMEGA default",
         }
 
     def _random_restart(self, pair: str):
