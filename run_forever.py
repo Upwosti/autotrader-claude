@@ -70,8 +70,9 @@ STATE_FILE   = os.path.join(STATE_DIR, "engine_state.json")
 SKILLS_FILE  = os.path.join(STATE_DIR, "skills.json")
 MONTHLY_FILE = os.path.join(STATE_DIR, "monthly_backtest.json")
 
-TARGET_WR    = 0.80   # never stop, but celebrate when hit
-RRR_FLOOR    = 0.3   # achieved avg rrr; partial-close logic keeps this ~0.9 for all strategies
+TARGET_WR    = 0.60   # OMEGA target: 55-65% WR with 2.5-5.0 RRR
+RRR_FLOOR    = 1.0   # OMEGA: minimum avg realized RRR (transitioning from 0.3→1.0→1.5)
+MIN_WR_FLOOR = 0.50  # OMEGA: absolute minimum WR (allows trading WR for RR)
 STUCK_RESTART = 50    # random restart threshold per pair
 STUCK_STRATEGY = 100  # new strategy type threshold
 GITHUB_EVERY  = 10    # sync every N iterations
@@ -122,7 +123,12 @@ PARAM_RANGES = {
     "ema_long":         [150, 200, 233],
     "atr_period":       [10, 14, 20],
     "sl_atr_mult":      [0.3, 0.5, 0.75, 1.0, 1.5],
-    "tp_rrr":           [1.5, 2.0, 2.5, 3.0, 4.0],
+    # OMEGA: extended tp_rrr range to allow 5R-8R runners
+    "tp_rrr":           [1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0],
+    # OMEGA: wider trailing = more room for runners
+    "trail_atr_mult":   [1.0, 1.5, 2.0, 2.5, 3.0, 4.0],
+    # OMEGA: smaller partial (25%) to keep more runner position
+    "partial_pct_1r":   [0.0, 0.10, 0.25, 0.50],
     "min_adx":          [15.0, 20.0, 25.0, 30.0],
     "rsi_long_min":     [25.0, 30.0, 35.0, 40.0],
     "rsi_long_max":     [55.0, 60.0, 65.0, 68.0, 70.0],
@@ -135,12 +141,12 @@ PARAM_RANGES = {
     "use_weekly_filter":[True, False],
     "use_ema_stack":    [True, False],
     "use_expansion":    [True, False],
-    # use_ict_filter excluded: ICT scorer is too slow to include in mutation search
-    # ict_min_score excluded: only relevant if use_ict_filter is manually enabled
+    # use_ict_filter excluded: too slow for mutation search
 }
 
 PARAM_PRIORITIES = [
-    "tp_rrr", "sl_atr_mult", "min_confluence",
+    "tp_rrr", "trail_atr_mult", "partial_pct_1r",   # asymmetric payoff — highest priority
+    "sl_atr_mult", "min_confluence",
     "use_pattern", "rsi_long_max",
     "rsi_short_min", "min_adx", "ema_slow",
     "use_adx_filter", "use_weekly_filter", "use_ema_stack",
