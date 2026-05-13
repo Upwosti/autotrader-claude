@@ -285,8 +285,9 @@ class WalkForwardBacktester:
                         second_half_rrr = 0
 
                     if partial_closed:
-                        # 50% closed at 1:1 + 50% at current exit
-                        raw_rrr = partial_close_pnl + 0.5 * second_half_rrr
+                        # partial_pct at 1R + (1-partial_pct) runner at current exit
+                        runner_pct = 1.0 - partial_pct
+                        raw_rrr = partial_close_pnl + runner_pct * second_half_rrr
                     else:
                         raw_rrr = second_half_rrr
 

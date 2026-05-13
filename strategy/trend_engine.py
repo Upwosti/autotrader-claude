@@ -72,6 +72,10 @@ class TrendParams:
     use_ict_filter: bool    = False  # ICT score gate for XAUUSD signals (min score 40)
     ict_min_score: int      = 40    # Minimum ICT advanced score to allow signal
 
+    # Exit behavior — asymmetric payoff
+    trail_atr_mult: float = 2.0   # ATR multiple for trailing stop (wider = more room to run)
+    partial_pct_1r: float = 0.25  # Fraction of position closed at 1:1 (0=no partial, 0.5=half)
+
     # Min trade duration filter (skip ultra-fast trades)
     min_hold_bars: int = 0     # min bars held before forced close
 
