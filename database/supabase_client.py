@@ -31,10 +31,10 @@ class SupabaseClient:
 
     def _connect(self):
         if not SUPABASE_AVAILABLE:
-            logger.warning("supabase library not installed — using local fallback")
+            logger.debug("supabase not installed — local fallback")
             return
         if not SUPABASE_URL or not SUPABASE_KEY:
-            logger.warning("SUPABASE_URL/KEY not set — using local fallback")
+            logger.debug("SUPABASE not configured — local fallback")
             return
         try:
             self.client = create_client(SUPABASE_URL, SUPABASE_KEY)

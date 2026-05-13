@@ -171,8 +171,42 @@ def send_telegram(msg: str) -> None:
         logger.debug(f"Telegram failed: {e}")
 
 
-def send_email(subject: str, body_html: str) -> None:
+_EMAIL_TRACKER_PATH = os.path.join(_ROOT, "data", "email_tracker.json")
+
+def _email_already_sent(key: str) -> bool:
+    """Return True if this email key was already sent today."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        if os.path.exists(_EMAIL_TRACKER_PATH):
+            with open(_EMAIL_TRACKER_PATH) as f:
+                tracker = json.load(f)
+        else:
+            tracker = {}
+        return tracker.get(key) == today
+    except Exception:
+        return False
+
+def _mark_email_sent(key: str) -> None:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        if os.path.exists(_EMAIL_TRACKER_PATH):
+            with open(_EMAIL_TRACKER_PATH) as f:
+                tracker = json.load(f)
+        else:
+            tracker = {}
+        tracker[key] = today
+        with open(_EMAIL_TRACKER_PATH, "w") as f:
+            json.dump(tracker, f)
+    except Exception:
+        pass
+
+def send_email(subject: str, body_html: str, dedup_key: str = "") -> None:
     if not EMAIL_FROM or not EMAIL_PASS or not EMAIL_TO:
+        return
+    # Deduplication: skip if already sent today with same key
+    key = dedup_key or subject[:50]
+    if _email_already_sent(key):
+        logger.debug(f"Email skipped (already sent today): {key}")
         return
     try:
         msg = MIMEMultipart("alternative")
@@ -184,6 +218,7 @@ def send_email(subject: str, body_html: str) -> None:
             s.starttls()
             s.login(EMAIL_FROM, EMAIL_PASS)
             s.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        _mark_email_sent(key)
         logger.info(f"Email sent: {subject}")
     except Exception as e:
         logger.debug(f"Email failed: {e}")
@@ -199,7 +234,7 @@ def github_sync(iteration: int, xau_wr: float) -> None:
         subprocess.run(["git", "commit", "-m", msg], cwd=cwd, capture_output=True, timeout=30)
         remote = f"https://{GH_TOKEN}@github.com/{GH_USER}/{GH_REPO}.git"
         result = subprocess.run(
-            ["git", "push", remote, "HEAD:main"],
+            ["git", "push", remote, "HEAD:master"],
             cwd=cwd, capture_output=True, timeout=60)
         if result.returncode == 0:
             logger.info(f"GitHub sync: {msg}")
@@ -207,6 +242,114 @@ def github_sync(iteration: int, xau_wr: float) -> None:
             logger.debug(f"GitHub push: {result.stderr.decode()[:200]}")
     except Exception as e:
         logger.debug(f"GitHub sync failed: {e}")
+
+
+# ── Telegram Command Handler ────────────────────────────────────────────────────
+
+_tg_offset = 0
+_engine_paused = False
+
+def _poll_telegram_commands(engine) -> None:
+    """Poll getUpdates and execute commands. Call from scheduler thread."""
+    global _tg_offset, _engine_paused
+    if not TG_TOKEN:
+        return
+    try:
+        import ssl, urllib.request
+        url = (f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
+               f"?offset={_tg_offset}&timeout=2&limit=10")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(url, timeout=8, context=ctx) as r:
+            data = json.loads(r.read())
+        if not data.get("ok"):
+            return
+        for upd in data.get("result", []):
+            _tg_offset = upd["update_id"] + 1
+            msg = upd.get("message", {}).get("text", "").strip().lower()
+            if not msg.startswith("/"):
+                continue
+            cmd = msg.split()[0]
+            reply = _handle_command(cmd, engine)
+            if reply:
+                send_telegram(reply)
+    except Exception:
+        pass
+
+def _handle_command(cmd: str, engine) -> str:
+    global _engine_paused
+    try:
+        if cmd == "/status":
+            top = sorted(engine.best_wr.items(), key=lambda x: x[1], reverse=True)[:5]
+            pairs_str = " | ".join(f"{p} {w:.1%}" for p, w in top)
+            return (f"AUTOTRADER STATUS\n"
+                    f"Iter: {engine.iteration:,}\n"
+                    f"XAUUSD WR: {engine.xauusd_best_wr:.1%}\n"
+                    f"Paused: {_engine_paused}\n"
+                    f"Top: {pairs_str}")
+        elif cmd == "/pause":
+            _engine_paused = True
+            return "Engine PAUSED — no new entries."
+        elif cmd == "/resume":
+            _engine_paused = False
+            return "Engine RESUMED."
+        elif cmd == "/stop":
+            _engine_paused = True
+            return "Engine PAUSED via /stop. Use /resume to restart."
+        elif cmd == "/ram":
+            try:
+                import psutil
+                m = psutil.virtual_memory()
+                used = m.used / 1024**3
+                pct  = m.percent
+                return f"RAM: {used:.1f}GB / {m.total/1024**3:.1f}GB ({pct:.1f}%)"
+            except Exception:
+                return "RAM: psutil not available"
+        elif cmd == "/best":
+            top = sorted(engine.best_wr.items(), key=lambda x: x[1], reverse=True)[:10]
+            lines = [f"TOP PAIRS BY WR"]
+            for p, w in top:
+                rr = engine.best_rrr.get(p, 0)
+                exp = w * rr - (1 - w)
+                lines.append(f"{p}: WR {w:.1%} RR {rr:.2f} E={exp:.3f}")
+            return "\n".join(lines)
+        elif cmd == "/report":
+            top = sorted(engine.best_wr.items(), key=lambda x: x[1], reverse=True)
+            lines = [f"FULL REPORT — iter {engine.iteration:,}"]
+            for p, w in top:
+                rr  = engine.best_rrr.get(p, 0)
+                exp = w * rr - (1 - w)
+                lines.append(f"{p}: WR={w:.1%} RR={rr:.2f} E={exp:.3f}")
+            return "\n".join(lines)
+        elif cmd == "/audit":
+            import psutil
+            ram = psutil.virtual_memory().percent if _try_import("psutil") else 0
+            return (f"AUDIT\nIter: {engine.iteration:,}\n"
+                    f"Pairs: {len(engine.best_wr)}\nRAM: {ram:.1f}%\n"
+                    f"Git: master\nPaused: {_engine_paused}")
+        elif cmd == "/risk":
+            lines = ["RISK MULTIPLIERS"]
+            if engine._drift_monitor:
+                for p, m in engine._drift_monitor._risk_overrides.items():
+                    if m < 1.0:
+                        lines.append(f"{p}: x{m:.2f}")
+            if len(lines) == 1:
+                lines.append("All pairs at 1.0x")
+            return "\n".join(lines)
+        elif cmd == "/close_all":
+            return "CLOSE_ALL: No live MT5 positions active (demo mode). Use MT5 terminal."
+        else:
+            return f"Unknown: {cmd}\nCommands: /status /pause /resume /report /best /ram /audit /risk /close_all"
+    except Exception as e:
+        return f"Command error: {e}"
+
+def _try_import(mod: str) -> bool:
+    try:
+        __import__(mod)
+        return True
+    except ImportError:
+        return False
 
 
 # ── Main Engine ────────────────────────────────────────────────────────────────
@@ -389,8 +532,10 @@ class AutoTraderEngine:
             logger.debug(f"[{pair}] REJECT: wr={wr:.1%} < floor {wr_floor:.1%}")
             return False
 
-        # Rule 3: combined score must improve
-        score = wr * min(rrr, 5.0)
+        # Rule 3: expectancy must improve (E = WR*AvgWin - (1-WR)*AvgLoss)
+        # Penalty if RR < 1.5 to push toward higher-RR systems
+        rr_penalty = max(0.0, (1.5 - rrr) * 0.1)
+        score = wr * min(rrr, 5.0) - rr_penalty
         cur_best = self.best_score.get(pair, 0)
         if score <= cur_best:
             logger.debug(f"[{pair}] REJECT: score={score:.4f} <= best {cur_best:.4f}")
@@ -407,7 +552,8 @@ class AutoTraderEngine:
     def accept(self, pair: str, params: dict, result: dict):
         wr    = result.get("win_rate", 0)
         rrr   = result.get("avg_rrr", 0)
-        score = wr * min(rrr, 5.0)
+        rr_penalty = max(0.0, (1.5 - rrr) * 0.1)
+        score = wr * min(rrr, 5.0) - rr_penalty
 
         self.best_wr[pair]     = max(self.best_wr.get(pair, 0), wr)
         self.best_rrr[pair]    = max(self.best_rrr.get(pair, 0), rrr)
@@ -1181,6 +1327,7 @@ class AutoTraderEngine:
                 # Interval tasks
                 if now - self._last_30min >= 1800:
                     self._check_30min()
+                    _poll_telegram_commands(self)
                     self._last_30min = now
 
                 if now - self._last_2h >= 7200:
