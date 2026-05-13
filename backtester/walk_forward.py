@@ -230,23 +230,25 @@ class WalkForwardBacktester:
                     tp_full = active.tp
 
                 # ── Partial close at 1:1 ─────────────────────────────────────
+                partial_pct = float(getattr(self.params, "partial_pct_1r", 0.25))
                 if not partial_closed:
                     reached_tp1 = (active.direction == "long"  and high_i >= tp1) or \
                                   (active.direction == "short" and low_i  <= tp1)
                     if reached_tp1:
                         partial_closed    = True
-                        # 50% closed at 1:1 — capture pnl for that half
-                        partial_close_pnl = 0.5 * 1.0   # 0.5 * 1RR win
+                        # partial_pct closed at 1:1 — capture pnl for that fraction
+                        partial_close_pnl = partial_pct * 1.0
                         # Move SL to breakeven
                         trailing_sl = effective_entry
 
                 # ── Update trailing stop (after partial close) ───────────────
+                trail_mult = float(getattr(self.params, "trail_atr_mult", 2.0))
                 if partial_closed and atr_i > 0:
                     if active.direction == "long":
-                        new_trail = close_i - atr_i
+                        new_trail = close_i - trail_mult * atr_i
                         trailing_sl = max(trailing_sl, new_trail)
                     else:
-                        new_trail = close_i + atr_i
+                        new_trail = close_i + trail_mult * atr_i
                         trailing_sl = min(trailing_sl, new_trail)
 
                 current_sl = trailing_sl if partial_closed else active.sl
