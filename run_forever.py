@@ -321,13 +321,17 @@ def _handle_command(cmd: str, engine) -> str:
                 lines.append(f"{p}: WR {w:.1%} RR {rr:.2f} E={exp:.3f}")
             return "\n".join(lines)
         elif cmd == "/report":
-            top = sorted(engine.best_wr.items(), key=lambda x: x[1], reverse=True)
-            lines = [f"FULL REPORT — iter {engine.iteration:,}"]
-            for p, w in top:
-                rr  = engine.best_rrr.get(p, 0)
-                exp = w * rr - (1 - w)
-                lines.append(f"{p}: WR={w:.1%} RR={rr:.2f} E={exp:.3f}")
-            return "\n".join(lines)
+            try:
+                from evolution.evolution_engine import get_engine as _get_evo
+                return _get_evo().generate_report()
+            except Exception:
+                top = sorted(engine.best_wr.items(), key=lambda x: x[1], reverse=True)
+                lines = [f"REPORT — iter {engine.iteration:,}"]
+                for p, w in top:
+                    rr  = engine.best_rrr.get(p, 0)
+                    exp = w * rr - (1 - w)
+                    lines.append(f"{p}: WR={w:.1%} RR={rr:.2f} E={exp:.3f}")
+                return "\n".join(lines)
         elif cmd == "/audit":
             import psutil
             ram = psutil.virtual_memory().percent if _try_import("psutil") else 0
@@ -630,6 +634,13 @@ class AutoTraderEngine:
         try:
             from analytics.expectancy_engine import get_engine as _get_exp
             _get_exp().update_from_result(pair, result)
+        except Exception:
+            pass
+
+        # Update standalone evolution engine state
+        try:
+            from evolution.evolution_engine import get_engine as _get_evo
+            _get_evo().accept(pair, params, result)
         except Exception:
             pass
 
@@ -1575,6 +1586,20 @@ class AutoTraderEngine:
             logger.info("ResourceMonitor loaded")
         except Exception as e:
             logger.debug(f"ResourceMonitor unavailable: {e}")
+
+        try:
+            from evolution.evolution_engine import get_engine as _get_evo
+            _get_evo()  # init singleton
+            logger.info("EvolutionEngine loaded")
+        except Exception as e:
+            logger.debug(f"EvolutionEngine unavailable: {e}")
+
+        try:
+            from portfolio.portfolio_engine import get_portfolio
+            get_portfolio()  # init singleton
+            logger.info("PortfolioEngine loaded")
+        except Exception as e:
+            logger.debug(f"PortfolioEngine unavailable: {e}")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
