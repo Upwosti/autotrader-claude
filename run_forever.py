@@ -70,15 +70,17 @@ STATE_FILE   = os.path.join(STATE_DIR, "engine_state.json")
 SKILLS_FILE  = os.path.join(STATE_DIR, "skills.json")
 MONTHLY_FILE = os.path.join(STATE_DIR, "monthly_backtest.json")
 
-TARGET_WR    = 0.60   # OMEGA target: 55-65% WR with 2.5-5.0 RRR
-RRR_FLOOR    = 1.0   # OMEGA: minimum avg realized RRR (transitioning from 0.3→1.0→1.5)
-MIN_WR_FLOOR = 0.50  # OMEGA: absolute minimum WR (allows trading WR for RR)
+TARGET_WR    = 0.65   # Realistic target: 60-65% WR with 2.0-3.0 RRR
+TARGET_RRR   = 2.0    # Minimum acceptable realized RRR
+RRR_FLOOR    = 1.5    # Hard floor: reject anything below 1.5 avg realized RRR
+MIN_WR_FLOOR = 0.55   # Absolute WR floor — anything below 55% is noise
+MAX_WR_CAP   = 0.75   # Anything above 75% WR is likely curve-fitted — flag it
 STUCK_RESTART = 50    # random restart threshold per pair
 STUCK_STRATEGY = 100  # new strategy type threshold
 GITHUB_EVERY  = 10    # sync every N iterations
 REPORT_EVERY  = 100   # full ranking report interval
 MONTE_N       = 1000  # Monte Carlo shuffles
-MONTE_MIN     = 0.65  # min MC survival rate (OMEGA spec: 65%)
+MONTE_MIN     = 0.65  # min MC survival rate
 
 # ── Pairs ──────────────────────────────────────────────────────────────────────
 PAIRS = [
@@ -117,41 +119,45 @@ PAIR_WEIGHTS = {
 }
 
 # ── Parameter search space ─────────────────────────────────────────────────────
+# REALISTIC SL: D1 bars need 1.5-2.5× ATR to avoid intraday noise stops.
+# Tight SL (0.5×ATR) on D1 is the #1 cause of fake 80%+ WR in backtests.
 PARAM_RANGES = {
     "ema_fast":         [8, 13, 21, 34],
     "ema_slow":         [34, 50, 55, 89, 100, 144],
     "ema_long":         [150, 200, 233],
     "atr_period":       [10, 14, 20],
-    "sl_atr_mult":      [0.3, 0.5, 0.75, 1.0, 1.5],
-    # OMEGA: extended tp_rrr range to allow 5R-8R runners
-    "tp_rrr":           [1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0],
-    # OMEGA: wider trailing = more room for runners
-    "trail_atr_mult":   [1.0, 1.5, 2.0, 2.5, 3.0, 4.0],
-    # OMEGA: smaller partial (25%) to keep more runner position
-    "partial_pct_1r":   [0.0, 0.10, 0.25, 0.50],
+    # Realistic D1 SL: 1.5-3.0×ATR gives genuine 60-65% WR in live trading
+    "sl_atr_mult":      [1.0, 1.5, 2.0, 2.5, 3.0],
+    # TP: 3R-8R runners — wide TP + good trail = high RRR
+    "tp_rrr":           [2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0],
+    # Trail: 2.0-4.0×ATR for D1 — tight trail kills runners
+    "trail_atr_mult":   [1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
+    # Partial: 25% or 0% — keep most of position running
+    "partial_pct_1r":   [0.0, 0.15, 0.25],
     "min_adx":          [15.0, 20.0, 25.0, 30.0],
     "rsi_long_min":     [25.0, 30.0, 35.0, 40.0],
     "rsi_long_max":     [55.0, 60.0, 65.0, 68.0, 70.0],
     "rsi_short_min":    [30.0, 32.0, 35.0],
     "rsi_short_max":    [60.0, 65.0, 70.0, 72.0, 75.0],
     "min_confluence":   [2, 3, 4],
-    "min_hold_bars":    [0, 1, 2],
+    "min_hold_bars":    [1, 2, 3],
     "use_pattern":      [True, False],
     "use_adx_filter":   [True, False],
     "use_weekly_filter":[True, False],
     "use_ema_stack":    [True, False],
     "use_expansion":    [True, False],
-    # use_ict_filter excluded: too slow for mutation search
 }
 
 PARAM_PRIORITIES = [
-    "tp_rrr", "trail_atr_mult", "partial_pct_1r",   # asymmetric payoff — highest priority
-    "sl_atr_mult", "min_confluence",
-    "use_pattern", "rsi_long_max",
-    "rsi_short_min", "min_adx", "ema_slow",
-    "use_adx_filter", "use_weekly_filter", "use_ema_stack",
-    "ema_fast", "ema_long", "min_hold_bars",
-    "rsi_long_min", "rsi_short_max", "use_expansion",
+    "sl_atr_mult",                          # #1: wider SL = realistic WR
+    "tp_rrr", "trail_atr_mult",             # #2: bigger TP + smart trail = high RRR
+    "partial_pct_1r",                       # #3: keep runners alive
+    "min_confluence",
+    "use_ema_stack", "use_weekly_filter",
+    "rsi_long_max", "rsi_short_min", "min_adx",
+    "use_adx_filter", "use_pattern",
+    "ema_fast", "ema_slow", "ema_long",
+    "min_hold_bars", "rsi_long_min", "rsi_short_max", "use_expansion",
     "atr_period",
 ]
 
@@ -580,69 +586,82 @@ class AutoTraderEngine:
         return weighted[self.iteration % len(weighted)]
 
     def is_better(self, pair: str, result: dict) -> bool:
-        """OMEGA acceptance: all 7 conditions must pass."""
-        wr     = result.get("win_rate", 0)
-        rrr    = result.get("avg_rrr", 0)
-        trades = result.get("trades", 0)
-        dd     = result.get("max_drawdown", 0)
-        pf     = result.get("profit_factor", 0)
+        """
+        Realistic acceptance: 60-65% WR + 2.0+ RRR target.
+        WR above 75% on D1 = likely curve-fitted (rejected).
+        Scoring is expectancy-first — no WR lock-in loop.
+        """
+        wr      = result.get("win_rate", 0)
+        rrr     = result.get("avg_rrr", 0)
+        trades  = result.get("trades", 0)
+        dd      = result.get("max_drawdown", 0)
+        pf      = result.get("profit_factor", 0)
         overfit = result.get("overfitting", False)
+        train_wr = result.get("train_wr", wr)
 
+        # ── Gate 0: minimum sample ────────────────────────────────────────────
         if trades < 15:
             logger.debug(f"[{pair}] REJECT: trades={trades} < 15")
             return False
 
-        # 1. WR ≥ 90% of pair's best (protect best_WR per pair)
-        wr_floor = max(MIN_WR_FLOOR, self.best_wr.get(pair, 0) * 0.90)
-        if wr < wr_floor:
-            logger.debug(f"[{pair}] REJECT: wr={wr:.1%} < floor {wr_floor:.1%}")
+        # ── Gate 1: Realistic WR band 55-75% ─────────────────────────────────
+        # Below 55% = noise. Above 75% on D1 = almost certainly over-fitted.
+        if wr < MIN_WR_FLOOR:
+            logger.debug(f"[{pair}] REJECT: wr={wr:.1%} < min {MIN_WR_FLOOR:.0%}")
             return False
+        if wr > MAX_WR_CAP:
+            # Don't hard-reject — check if train WR is similarly high (genuine)
+            # If train WR is also >75%, probably a quirky asset, allow it
+            if train_wr <= MAX_WR_CAP + 0.05:
+                logger.debug(f"[{pair}] REJECT: wr={wr:.1%} > cap {MAX_WR_CAP:.0%} (likely curve-fit)")
+                return False
+            # else: train also very high → genuine asset characteristic, allow
 
-        # 2. RRR floor
+        # ── Gate 2: Hard RRR floor ────────────────────────────────────────────
         if rrr < RRR_FLOOR:
-            logger.debug(f"[{pair}] REJECT: rrr={rrr:.3f} < {RRR_FLOOR}")
+            logger.debug(f"[{pair}] REJECT: rrr={rrr:.2f} < floor {RRR_FLOOR}")
             return False
 
-        # 3. Drawdown < 8%
-        if dd > 0.08:
-            logger.debug(f"[{pair}] REJECT: dd={dd:.1%} > 8%")
+        # ── Gate 3: Drawdown < 10% ────────────────────────────────────────────
+        if dd > 0.10:
+            logger.debug(f"[{pair}] REJECT: dd={dd:.1%} > 10%")
             return False
 
-        # 4. Profit Factor > 1.3
+        # ── Gate 4: Profit Factor > 1.3 ──────────────────────────────────────
         if pf > 0 and pf < 1.3:
             logger.debug(f"[{pair}] REJECT: pf={pf:.2f} < 1.3")
             return False
 
-        # 5. No overfit (train/test gap guard from WF backtest)
+        # ── Gate 5: Overfit check ─────────────────────────────────────────────
         if overfit:
             self.overfit_strikes[pair] = self.overfit_strikes.get(pair, 0) + 1
             strikes = self.overfit_strikes[pair]
-            logger.debug(f"[{pair}] REJECT: overfit flag set (strike {strikes})")
-            # After 30 consecutive overfit rejections, force a conservative reset
+            logger.debug(f"[{pair}] REJECT: overfit (strike {strikes})")
             if strikes > 0 and strikes % 30 == 0:
-                logger.info(f"[{pair}] OVERFIT RESET after {strikes} strikes → forcing conservative params")
+                logger.info(f"[{pair}] OVERFIT RESET after {strikes} strikes")
                 self._overfit_reset(pair)
             return False
         else:
-            self.overfit_strikes[pair] = 0  # reset on clean result
+            self.overfit_strikes[pair] = 0
 
-        # 6. Expectancy > 0 and must beat best
+        # ── Gate 6: Positive expectancy ───────────────────────────────────────
         expectancy = wr * rrr - (1 - wr)
         if expectancy <= 0:
-            logger.debug(f"[{pair}] REJECT: expectancy={expectancy:.4f} <= 0")
+            logger.debug(f"[{pair}] REJECT: E={expectancy:.4f} <= 0")
             return False
 
-        # Score: expectancy + RR asymmetry bonus
-        score = expectancy + max(0.0, rrr - 1.5) * 0.05
+        # ── Gate 7: Beat current best score ──────────────────────────────────
+        # Score = expectancy + strong RRR bonus (rewards 2R+ over 1.5R)
+        score = expectancy + max(0.0, rrr - TARGET_RRR) * 0.15
         cur_best = self.best_score.get(pair, 0)
         if score <= cur_best:
             logger.debug(f"[{pair}] REJECT: score={score:.4f} <= best {cur_best:.4f}")
             return False
 
-        # 7. Monte Carlo survival > 65%
+        # ── Gate 8: Monte Carlo ───────────────────────────────────────────────
         mc_pass = result.get("monte_carlo_pass_rate", 1.0)
-        if mc_pass < 0.65:
-            logger.debug(f"[{pair}] REJECT: mc_pass={mc_pass:.2f} < 0.65")
+        if mc_pass < MONTE_MIN:
+            logger.debug(f"[{pair}] REJECT: mc={mc_pass:.2f} < {MONTE_MIN}")
             return False
 
         return True
@@ -794,12 +813,14 @@ class AutoTraderEngine:
         if sk and isinstance(sk, dict) and "params" in sk:
             return copy.deepcopy(sk["params"])
 
-        # OMEGA default — asymmetric payoff profile
+        # REALISTIC default: wide SL (1.5×ATR on D1) → genuine 60-65% WR
         return {
             "ema_fast": 21, "ema_slow": 89, "ema_long": 200,
             "ema_weekly": 26, "atr_period": 14,
-            "sl_atr_mult": 0.75, "tp_rrr": 4.0,
-            "trail_atr_mult": 2.5, "partial_pct_1r": 0.25,
+            "sl_atr_mult": 1.5,    # WIDE: 1.5×ATR stops intraday noise from triggering SL
+            "tp_rrr": 4.0,         # 4R target = realistic with wide SL
+            "trail_atr_mult": 2.5, # 2.5×ATR trail = room to breathe
+            "partial_pct_1r": 0.25,
             "min_adx": 20.0,
             "rsi_long_min": 30.0, "rsi_long_max": 68.0,
             "rsi_short_min": 32.0, "rsi_short_max": 65.0,
@@ -809,9 +830,9 @@ class AutoTraderEngine:
             "use_adx_filter": True, "use_volume_filter": False,
             "use_expansion": True, "use_ict_filter": False,
             "ict_min_score": 40,
-            "min_hold_bars": 1, "min_confluence": 3,
-            "version": 1, "strategy_name": "HighConfluenceTrend",
-            "notes": "OMEGA default",
+            "min_hold_bars": 2, "min_confluence": 3,
+            "version": 1, "strategy_name": "RealisticTrend",
+            "notes": "Realistic D1 default: wide SL, high RRR",
         }
 
     def _random_restart(self, pair: str):
@@ -833,27 +854,27 @@ class AutoTraderEngine:
     def _new_strategy_type(self, pair: str):
         """Try a completely different parameter configuration after 100 stuck iters."""
         logger.info(f"NEW STRATEGY TYPE [{pair}] after {STUCK_STRATEGY} stuck iters")
-        # OMEGA strategy templates — all target asymmetric payoff
+        # Realistic strategy templates: wide SL → honest WR, high TP → high RRR
         strategies = [
-            # Momentum runner: wide TP, wide trail, small partial
-            {"tp_rrr": 6.0, "trail_atr_mult": 3.0, "partial_pct_1r": 0.10,
-             "sl_atr_mult": 1.0, "min_confluence": 3,
+            # Trend runner: 2×ATR SL, 6R TP, small partial
+            {"tp_rrr": 6.0, "trail_atr_mult": 3.0, "partial_pct_1r": 0.15,
+             "sl_atr_mult": 2.0, "min_confluence": 3,
              "use_ema_stack": True, "use_adx_filter": True, "use_expansion": True},
-            # Breakout with runner
+            # Swing breakout: 2×ATR SL, 5R TP, partial at 1R
             {"tp_rrr": 5.0, "trail_atr_mult": 2.5, "partial_pct_1r": 0.25,
-             "sl_atr_mult": 0.75, "min_confluence": 3,
+             "sl_atr_mult": 2.0, "min_confluence": 3,
              "use_ema_stack": True, "use_weekly_filter": True, "use_pattern": True},
-            # Swing trade, patient
+            # Patient swing: 2.5×ATR SL, 4R TP, 25% partial
             {"tp_rrr": 4.0, "trail_atr_mult": 2.0, "partial_pct_1r": 0.25,
-             "sl_atr_mult": 1.0, "min_confluence": 4,
+             "sl_atr_mult": 2.5, "min_confluence": 4,
              "use_ema_stack": True, "use_weekly_filter": True, "use_expansion": True},
-            # Aggressive runner, no partial
+            # Pure runner: 2.5×ATR SL, 8R TP, no partial
             {"tp_rrr": 8.0, "trail_atr_mult": 4.0, "partial_pct_1r": 0.0,
-             "sl_atr_mult": 1.5, "min_confluence": 3,
+             "sl_atr_mult": 2.5, "min_confluence": 3,
              "use_adx_filter": True, "use_weekly_filter": True},
-            # Conservative: moderate RR, clean entries
+            # Moderate: 1.5×ATR SL, 3R TP, patient entry
             {"tp_rrr": 3.0, "trail_atr_mult": 2.0, "partial_pct_1r": 0.25,
-             "sl_atr_mult": 0.5, "min_confluence": 4,
+             "sl_atr_mult": 1.5, "min_confluence": 4,
              "use_ema_stack": True, "use_pattern": True},
         ]
         template = random.choice(strategies)

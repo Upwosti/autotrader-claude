@@ -45,7 +45,7 @@ PIP_SIZE: Dict[str, float] = {
     "DXY":    0.01,   "DX-Y.NYB": 0.01,
 }
 
-SLIPPAGE_PIPS: float = 0.5          # per entry OR exit
+SLIPPAGE_PIPS: float = 1.0          # per entry OR exit (D1 orders fill at next open, 1 pip realistic)
 COMMISSION_USD_PER_LOT: float = 7.0  # round-trip
 
 # Lot sizes (units per standard lot)

@@ -262,9 +262,28 @@ class WalkForwardBacktester:
                     if tp_hit and not sl_hit:
                         outcome = "win"
                         exit_p  = tp_full
-                    else:
-                        outcome = "loss" if not partial_closed else "win"  # partial = breakeven+
+                    elif sl_hit and not tp_hit:
+                        outcome = "loss" if not partial_closed else "win"
                         exit_p  = current_sl
+                    else:
+                        # BOTH TP and SL hit in the same bar — ambiguous on D1.
+                        # Use bar direction to estimate which came first:
+                        #   Bullish bar (close > open) → assume TP hit before SL
+                        #   Bearish bar (close < open) → assume SL hit before TP (conservative)
+                        #   For longs: if bar closes up, TP more likely first
+                        #   For shorts: if bar closes down, TP more likely first
+                        open_i = float(bar.get("open", (high_i + low_i) / 2))
+                        bar_bullish = close_i >= open_i
+                        if active.direction == "long":
+                            tp_first = bar_bullish   # bullish bar = TP hit first for longs
+                        else:
+                            tp_first = not bar_bullish  # bearish bar = TP hit first for shorts
+                        if tp_first:
+                            outcome = "win"
+                            exit_p  = tp_full
+                        else:
+                            outcome = "loss" if not partial_closed else "win"
+                            exit_p  = current_sl
 
                     # Skip ultra-short losses (data artefacts)
                     if outcome == "loss" and hold_bars < self.params.min_hold_bars:
