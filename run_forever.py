@@ -214,20 +214,52 @@ def send_email(subject: str, body_html: str, dedup_key: str = "") -> None:
     if _email_already_sent(key):
         logger.debug(f"Email skipped (already sent today): {key}")
         return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = EMAIL_FROM
+    msg["To"]      = EMAIL_TO
+    msg.attach(MIMEText(body_html, "html"))
+
+    sent = False
+
+    # Method 1: SSL on port 465 (most reliable with Gmail App Passwords)
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = EMAIL_FROM
-        msg["To"]      = EMAIL_TO
-        msg.attach(MIMEText(body_html, "html"))
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
-            s.starttls()
+        import ssl as _ssl
+        ctx = _ssl.create_default_context()
+        with smtplib.SMTP_SSL(SMTP_HOST, 465, timeout=30, context=ctx) as s:
             s.login(EMAIL_FROM, EMAIL_PASS)
             s.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        sent = True
+    except Exception as e1:
+        logger.debug(f"Email SSL/465 failed: {e1}")
+
+    # Method 2: STARTTLS on configured port (587)
+    if not sent:
+        try:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
+                s.ehlo()
+                s.starttls()
+                s.ehlo()
+                s.login(EMAIL_FROM, EMAIL_PASS)
+                s.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+            sent = True
+        except Exception as e2:
+            logger.debug(f"Email STARTTLS/587 failed: {e2}")
+            # Give actionable guidance once per day
+            if "BadCredentials" in str(e2) or "535" in str(e2):
+                logger.warning(
+                    "Email auth failed (BadCredentials). "
+                    "Gmail requires an App Password — go to "
+                    "https://myaccount.google.com/apppasswords, "
+                    "generate a 16-char password, and set EMAIL_PASSWORD=<app_password> in .env"
+                )
+
+    if sent:
         _mark_email_sent(key)
         logger.info(f"Email sent: {subject}")
-    except Exception as e:
-        logger.debug(f"Email failed: {e}")
+    else:
+        logger.debug(f"Email skipped (all methods failed) — subject: {subject}")
 
 
 def github_sync(iteration: int, xau_wr: float) -> None:
@@ -401,6 +433,7 @@ class AutoTraderEngine:
         # --- Per-pair stuck counters ---
         self.no_improve: Dict[str, int]  = {}
         self.pair_iter:  Dict[str, int]  = {}     # iters since last improvement
+        self.overfit_strikes: Dict[str, int] = {} # consecutive overfit rejections per pair
 
         # --- Smart mutation state ---
         # param_momentum[pair][param] = deque of (delta_score) last 5 changes
@@ -582,8 +615,16 @@ class AutoTraderEngine:
 
         # 5. No overfit (train/test gap guard from WF backtest)
         if overfit:
-            logger.debug(f"[{pair}] REJECT: overfit flag set")
+            self.overfit_strikes[pair] = self.overfit_strikes.get(pair, 0) + 1
+            strikes = self.overfit_strikes[pair]
+            logger.debug(f"[{pair}] REJECT: overfit flag set (strike {strikes})")
+            # After 30 consecutive overfit rejections, force a conservative reset
+            if strikes > 0 and strikes % 30 == 0:
+                logger.info(f"[{pair}] OVERFIT RESET after {strikes} strikes → forcing conservative params")
+                self._overfit_reset(pair)
             return False
+        else:
+            self.overfit_strikes[pair] = 0  # reset on clean result
 
         # 6. Expectancy > 0 and must beat best
         expectancy = wr * rrr - (1 - wr)
@@ -824,6 +865,38 @@ class AutoTraderEngine:
         self.no_improve[pair] = 0
         send_telegram(f"♻️ [{pair}] Switching strategy type after 100-iter plateau.")
 
+    def _overfit_reset(self, pair: str):
+        """Force conservative, low-overfit params when a pair is chronically overfitting.
+
+        Chronic overfitting means the strategy generates too many signals on training
+        data but fails on unseen test data. The fix: fewer confluences (higher min_confluence),
+        wider SL (more room), fewer optional filters (less curve-fitting to history).
+        """
+        conservative = self._default_params(pair)
+        # High confluence reduces signal count → fewer overfitting opportunities
+        conservative["min_confluence"] = 4
+        conservative["min_adx"] = 25.0
+        # Moderate TP/trail — not too greedy in train window
+        conservative["tp_rrr"] = 3.0
+        conservative["trail_atr_mult"] = 2.0
+        conservative["partial_pct_1r"] = 0.25
+        conservative["sl_atr_mult"] = 1.0
+        # Disable noisy optional filters
+        conservative["use_ema_stack"] = True
+        conservative["use_weekly_filter"] = True
+        conservative["use_pattern"] = False
+        conservative["use_expansion"] = False
+        conservative["use_adx_filter"] = True
+        conservative["version"] = conservative.get("version", 1) + 1
+        conservative["notes"] = "Overfit reset — conservative params"
+        self.current_params[pair] = conservative
+        self.no_improve[pair] = 0
+        self.overfit_strikes[pair] = 0
+        send_telegram(
+            f"🛡️ [{pair}] Overfit reset: conservative params applied.\n"
+            f"High confluence + wide SL + no curve-fitting filters."
+        )
+
     # ── Backtest ───────────────────────────────────────────────────────────────
 
     def _run_backtest(self, pair: str, params: dict) -> Optional[dict]:
@@ -989,6 +1062,7 @@ class AutoTraderEngine:
             "best_score":      self.best_score,
             "best_params":     self.best_params,
             "no_improve":      self.no_improve,
+            "overfit_strikes": self.overfit_strikes,
             "current_params":  self.current_params,
             "last_saved":      datetime.now(timezone.utc).isoformat(),
         }
@@ -1058,6 +1132,9 @@ class AutoTraderEngine:
 
                 _ni = s.get("no_improve", s.get("no_improvement_per_pair", {}))
                 self.no_improve = _ni if isinstance(_ni, dict) else {}
+
+                _os = s.get("overfit_strikes", {})
+                self.overfit_strikes = _os if isinstance(_os, dict) else {}
 
                 _cp = s.get("current_params", {})
                 if isinstance(_cp, dict) and "ema_fast" in _cp:

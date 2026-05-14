@@ -522,11 +522,11 @@ class WalkForwardBacktester:
         small   = len(all_test_trades) < self.MIN_TEST_TRADES
 
         if small:
-            logger.warning(f"{pair}: small test sample ({len(all_test_trades)} trades across {n_folds} folds)")
+            logger.debug(f"{pair}: small test sample ({len(all_test_trades)} trades across {n_folds} folds)")
         if overfit:
-            logger.warning(f"{pair}: possible overfitting "
-                           f"(train WR {tr_stats['win_rate']:.1%} vs "
-                           f"test WR {te_stats['win_rate']:.1%})")
+            logger.debug(f"{pair}: possible overfitting "
+                         f"(train WR {tr_stats['win_rate']:.1%} vs "
+                         f"test WR {te_stats['win_rate']:.1%})")
 
         return WFResult(
             params_version=self.params.version,
@@ -566,7 +566,7 @@ class WalkForwardBacktester:
         test_df  = daily_df.iloc[split_i:]
 
         if len(train_df) < 200 or len(test_df) < 50:
-            logger.warning(f"{pair}: insufficient data for walk-forward "
+            logger.debug(f"{pair}: insufficient data for walk-forward "
                            f"(train={len(train_df)}, test={len(test_df)})")
 
         logger.info(f"WF backtest: {pair} v{self.params.version} "
@@ -594,11 +594,11 @@ class WalkForwardBacktester:
         small   = len(test_trades) < self.MIN_TEST_TRADES
 
         if small:
-            logger.warning(f"{pair}: small test sample ({len(test_trades)} trades)")
+            logger.debug(f"{pair}: small test sample ({len(test_trades)} trades)")
         if overfit:
-            logger.warning(f"{pair}: possible overfitting "
-                           f"(train WR {tr_stats['win_rate']:.1%} vs "
-                           f"test WR {te_stats['win_rate']:.1%})")
+            logger.debug(f"{pair}: possible overfitting "
+                         f"(train WR {tr_stats['win_rate']:.1%} vs "
+                         f"test WR {te_stats['win_rate']:.1%})")
 
         return WFResult(
             params_version=self.params.version,
