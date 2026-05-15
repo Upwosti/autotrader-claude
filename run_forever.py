@@ -68,18 +68,29 @@ EMAIL_TO     = os.environ.get("EMAIL_RECEIVER", "")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 PAIRS = ["XAUUSD", "GBPUSD", "EURUSD", "USDJPY", "GBPJPY",
-         "BTCUSD", "NAS100", "US30", "AUDUSD"]
+         "AUDUSD", "USDCAD", "USDCHF", "NZDUSD", "EURJPY",
+         "BTCUSD", "ETHUSD", "NAS100", "US30", "GER40",
+         "XAGUSD"]
 
-# Risk hard rules
-MAX_RISK_PER_TRADE = 0.01   # 1%
-MAX_DAILY_LOSS     = 0.03   # 3%
-MAX_OPEN_TRADES    = 2
+# ─── FTMO hard limits (NEVER BREAK) ────────────────────────────────────────────
+FTMO_DAILY_LOSS_PCT = 0.05    # FTMO max 5%
+FTMO_TOTAL_DD_PCT   = 0.10    # FTMO max 10%
+FTMO_PROFIT_TARGET  = 0.10    # FTMO 10% target (Phase 1)
+
+# Our conservative buffers (stop BEFORE FTMO limit)
+MAX_RISK_PER_TRADE = 0.01     # 1% max per trade
+MIN_RISK_PER_TRADE = 0.0025   # 0.25% min per trade
+MAX_DAILY_LOSS     = 0.03     # stop at 3% (safe before 5%)
+MAX_TOTAL_DD       = 0.07     # stop at 7% (safe before 10%)
+MAX_OPEN_TRADES    = 1        # ONE trade at a time
 MAX_CORRELATED     = 1
 MIN_RRR            = 2.0
 MIN_CONFIDENCE     = 0.65
+MIN_SIGNALS        = 2        # require >=2 confluence signals
 
-START_BALANCE_TARGET = 5500.0
-START_BALANCE_BASE   = 5000.0
+# FTMO uses $10k account on this challenge
+START_BALANCE_TARGET = 12000.0  # 20% profit goal
+START_BALANCE_BASE   = 10000.0
 
 STATE_FILE      = ROOT / "state.json"
 PAIR_PROFILES   = DATADIR / "pair_profiles.json"
@@ -284,16 +295,39 @@ def classify_market(pair: str) -> Dict:
         return {"condition": "UNCLEAR", "behavior": "skip", "confidence": 0}
 
 # ── H4 bias ────────────────────────────────────────────────────────────────────
+def _tf_bias(df: Optional[pd.DataFrame]) -> Optional[str]:
+    if df is None or len(df) < 50: return None
+    fast = min(20, len(df)//3)
+    slow = min(50, len(df)//2)
+    if fast < 5 or slow < 10: return None
+    ef = ema(df["close"], fast).iloc[-1]
+    es = ema(df["close"], slow).iloc[-1]
+    last = df["close"].iloc[-1]
+    if last > ef > es: return "buy"
+    if last < ef < es: return "sell"
+    return None
+
 def get_h4_bias(pair: str) -> Optional[str]:
-    """Returns 'buy', 'sell' or None based on H4 EMA 50/200."""
     h4 = get_mt5_data(pair, "H4", 250)
-    if h4 is None or len(h4) < 210:
-        return None
+    if h4 is None or len(h4) < 210: return None
     e50  = ema(h4["close"], 50).iloc[-1]
     e200 = ema(h4["close"], 200).iloc[-1]
     last = h4["close"].iloc[-1]
     if last > e50 > e200: return "buy"
     if last < e50 < e200: return "sell"
+    return None
+
+def get_aligned_bias(pair: str) -> Optional[str]:
+    """MN1 + W1 + D1 must all agree (FTMO multi-TF rule)."""
+    mn = get_mt5_data(pair, "MN1", 24)
+    w1 = get_mt5_data(pair, "W1", 52)
+    d1 = get_mt5_data(pair, "D1", 200)
+    bmn, bw, bd = _tf_bias(mn), _tf_bias(w1), _tf_bias(d1)
+    if bmn and bw and bd and bmn == bw == bd:
+        return bmn
+    # Fall back to W1+D1 agreement if MN1 sparse
+    if bw and bd and bw == bd:
+        return bw
     return None
 
 # ── Entry signals ──────────────────────────────────────────────────────────────
@@ -379,7 +413,9 @@ def find_entry(pair: str, condition: Dict, profile: Dict) -> Optional[Dict]:
     m5 = get_mt5_data(pair, "M5", 200)
     if m5 is None or len(m5) < 50:
         return None
-    h4_bias = get_h4_bias(pair)
+    h4_bias = get_aligned_bias(pair)
+    if h4_bias is None:
+        h4_bias = get_h4_bias(pair)
     if h4_bias is None:
         return None
 
@@ -401,7 +437,7 @@ def find_entry(pair: str, condition: Dict, profile: Dict) -> Optional[Dict]:
         if br and br["direction"] == h4_bias:
             signals.append({"type": "breakout", "strength": 0.90 * profile.get("breakout", 1.0)})
 
-    if not signals:
+    if len(signals) < MIN_SIGNALS:
         return None
     confidence = sum(s["strength"] for s in signals) / len(signals)
     confidence *= condition.get("confidence", 1.0)
@@ -935,6 +971,197 @@ def scheduler_loop():
             log.debug(f"scheduler error: {e}")
         time.sleep(60)
 
+# ── Adaptive risk (FTMO) ───────────────────────────────────────────────────────
+def calculate_risk_pct(confidence: float) -> float:
+    if confidence >= 0.85: return 0.0100   # 1.00%
+    if confidence >= 0.75: return 0.0075   # 0.75%
+    if confidence >= 0.65: return 0.0050   # 0.50%
+    return MIN_RISK_PER_TRADE              # 0.25%
+
+# ── FTMO limit check ───────────────────────────────────────────────────────────
+_ftmo_state_cache = {"daily_start": None, "daily_date": None,
+                     "peak_balance": None, "start_balance": None,
+                     "paused_today": False, "halted_total": False}
+
+def check_ftmo_limits() -> bool:
+    """Returns True if trading allowed under FTMO rules."""
+    if not ensure_mt5(): return False
+    info = _mt5.account_info()
+    if info is None: return False
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    eq = info.equity; bal = info.balance
+
+    # Track persistent start balance
+    if _ftmo_state_cache["start_balance"] is None:
+        st = load_state()
+        if "start_balance" in st:
+            _ftmo_state_cache["start_balance"] = st["start_balance"]
+        else:
+            _ftmo_state_cache["start_balance"] = bal
+            st["start_balance"] = bal
+            save_state(st)
+
+    # Daily reset
+    if _ftmo_state_cache["daily_date"] != today:
+        _ftmo_state_cache["daily_date"] = today
+        _ftmo_state_cache["daily_start"] = bal
+        _ftmo_state_cache["paused_today"] = False
+
+    # Peak balance for total DD
+    if _ftmo_state_cache["peak_balance"] is None or bal > _ftmo_state_cache["peak_balance"]:
+        _ftmo_state_cache["peak_balance"] = max(bal, _ftmo_state_cache.get("peak_balance") or bal)
+        st = load_state()
+        st["peak_balance"] = _ftmo_state_cache["peak_balance"]
+        save_state(st)
+
+    if _ftmo_state_cache["halted_total"]:
+        return False
+
+    daily_start = _ftmo_state_cache["daily_start"]
+    daily_loss_pct = (daily_start - eq) / daily_start if daily_start else 0
+    if daily_loss_pct >= MAX_DAILY_LOSS:
+        if not _ftmo_state_cache["paused_today"]:
+            send_telegram(
+                f"⛔ DAILY LIMIT HIT\n"
+                f"Loss: {daily_loss_pct:.1%} | FTMO max: 5%\n"
+                f"Trading paused until tomorrow.")
+            _ftmo_state_cache["paused_today"] = True
+        return False
+
+    peak = _ftmo_state_cache["peak_balance"]
+    total_dd_pct = (peak - eq) / peak if peak else 0
+    if total_dd_pct >= MAX_TOTAL_DD:
+        send_telegram(
+            f"🚨 TOTAL DD LIMIT HIT\n"
+            f"DD: {total_dd_pct:.1%} | FTMO max: 10%\n"
+            f"ALL TRADING STOPPED — manual review required.")
+        _ftmo_state_cache["halted_total"] = True
+        return False
+
+    # Target achievement notice
+    start = _ftmo_state_cache["start_balance"]
+    profit_pct = (bal - start) / start if start else 0
+    st = load_state()
+    if profit_pct >= FTMO_PROFIT_TARGET and not st.get("ftmo_target_sent"):
+        send_telegram(
+            f"🏆 FTMO TARGET ACHIEVED!\n"
+            f"Profit: {profit_pct:.1%}\n"
+            f"Target was: {FTMO_PROFIT_TARGET:.0%}\n"
+            f"CHALLENGE PASSED!")
+        st["ftmo_target_sent"] = True
+        save_state(st)
+    return True
+
+def get_ftmo_progress() -> dict:
+    if not ensure_mt5(): return {}
+    info = _mt5.account_info()
+    if info is None: return {}
+    bal = info.balance; eq = info.equity
+    start = _ftmo_state_cache.get("start_balance") or load_state().get("start_balance", bal)
+    peak  = _ftmo_state_cache.get("peak_balance") or bal
+    daily_start = _ftmo_state_cache.get("daily_start") or bal
+    return {
+        "balance": bal, "equity": eq, "start": start, "peak": peak,
+        "profit_pct": ((bal - start) / start * 100) if start else 0,
+        "daily_loss_pct": max(0, (daily_start - eq) / daily_start * 100) if daily_start else 0,
+        "total_dd_pct": max(0, (peak - eq) / peak * 100) if peak else 0,
+    }
+
+# ── 2-year history analyzer ────────────────────────────────────────────────────
+HISTORY_REPORT_FILE = DATADIR / "history_report.json"
+
+def _quick_backtest_signals(df: pd.DataFrame) -> List[dict]:
+    """Quick EMA crossover backtest to get stats."""
+    if df is None or len(df) < 100: return []
+    df = df.copy()
+    df["ef"] = ema(df["close"], 20)
+    df["es"] = ema(df["close"], 50)
+    df["atr"] = atr(df, 14)
+    trades = []
+    in_pos = False; entry = 0; sl = 0; tp = 0; direction = ""
+    for i in range(60, len(df) - 1):
+        row = df.iloc[i]; prev = df.iloc[i-1]
+        if not in_pos:
+            if prev["ef"] < prev["es"] and row["ef"] > row["es"]:
+                entry = row["close"]; sl = entry - row["atr"]; tp = entry + 3*row["atr"]
+                direction = "buy"; in_pos = True
+            elif prev["ef"] > prev["es"] and row["ef"] < row["es"]:
+                entry = row["close"]; sl = entry + row["atr"]; tp = entry - 3*row["atr"]
+                direction = "sell"; in_pos = True
+        else:
+            nrow = df.iloc[i+1]
+            if direction == "buy":
+                if nrow["low"] <= sl:
+                    trades.append({"pnl": sl - entry}); in_pos = False
+                elif nrow["high"] >= tp:
+                    trades.append({"pnl": tp - entry}); in_pos = False
+            else:
+                if nrow["high"] >= sl:
+                    trades.append({"pnl": entry - sl}); in_pos = False
+                elif nrow["low"] <= tp:
+                    trades.append({"pnl": entry - tp}); in_pos = False
+    return trades
+
+def analyze_pair_history(pair: str, timeframe: str = "D1", bars: int = 730) -> dict:
+    df = get_mt5_data(pair, timeframe, bars)
+    if df is None or len(df) < 100:
+        return {}
+    atr_v  = float(atr(df, 14).mean())
+    adx_v  = adx(df, 14)
+    vol    = atr_v / df["close"].mean() * 100 if df["close"].mean() else 0
+    trades = _quick_backtest_signals(df)
+    if not trades: return {}
+    wins = [t for t in trades if t["pnl"] > 0]
+    losses = [t for t in trades if t["pnl"] <= 0]
+    total = len(trades)
+    wr = len(wins) / total if total else 0
+    avg_win = float(np.mean([t["pnl"] for t in wins])) if wins else 0
+    avg_loss = float(abs(np.mean([t["pnl"] for t in losses]))) if losses else 0
+    rrr = avg_win / avg_loss if avg_loss > 0 else 0
+    exp = wr * avg_win - (1 - wr) * avg_loss
+    return {
+        "total_signals": total, "win_rate": round(wr * 100, 1),
+        "avg_rrr": round(rrr, 2), "expectancy": round(exp, 4),
+        "trend_strength": round(float(adx_v), 1),
+        "volatility_pct": round(vol, 3),
+    }
+
+def read_all_history():
+    """Analyze 2 years of D1 + H4 for all pairs. Send Telegram + save JSON."""
+    log.info("Starting 2-year history analysis...")
+    report = {}
+    for pair in PAIRS:
+        try:
+            if ensure_mt5(): _mt5.symbol_select(pair, True)
+            d1 = analyze_pair_history(pair, "D1", 730)
+            h4 = analyze_pair_history(pair, "H4", 2000)
+            if d1 or h4:
+                report[pair] = {"D1": d1, "H4": h4}
+            gc.collect()
+        except Exception as e:
+            log.warning(f"history {pair} error: {e}")
+    try:
+        json.dump(report, open(HISTORY_REPORT_FILE, "w"), indent=2)
+    except Exception as e:
+        log.debug(f"save history error: {e}")
+    # Build ranked report
+    scores = []
+    for pair, tfs in report.items():
+        d = tfs.get("D1", {})
+        if d: scores.append({"pair": pair, "wr": d.get("win_rate",0),
+                             "rrr": d.get("avg_rrr",0), "exp": d.get("expectancy",0)})
+    scores.sort(key=lambda x: x["exp"], reverse=True)
+    msg = "=== 2-YEAR HISTORY REPORT (D1) ===\n\nRanked by expectancy:\n"
+    for i, p in enumerate(scores[:10]):
+        msg += f"{i+1}. {p['pair']}: WR={p['wr']:.0f}% RRR={p['rrr']:.1f} Exp={p['exp']:.3f}\n"
+    msg += "\nTop 3 for trading:\n"
+    for p in scores[:3]:
+        msg += f"→ {p['pair']}\n"
+    msg += "\n==============================="
+    send_telegram(msg)
+    log.info("History analysis complete.")
+    return report
+
 # ── Telegram BOT (command handler) ─────────────────────────────────────────────
 TRADING_ENABLED = True
 _bot = None
@@ -1121,21 +1348,98 @@ def start_telegram_bot():
         except Exception as e:
             _bot.reply_to(message, f"Error: {e}")
 
+    @_bot.message_handler(commands=["progress"])
+    def cmd_progress(message):
+        if not _is_auth(message): return
+        try:
+            p = get_ftmo_progress()
+            if not p: _bot.reply_to(message, "MT5 disconnected"); return
+            _bot.reply_to(message,
+                f"=== FTMO PROGRESS ===\n"
+                f"Target: 10% profit (Phase 1)\n"
+                f"Current: {p['profit_pct']:.2f}%\n"
+                f"Remaining: {max(0, 10 - p['profit_pct']):.2f}%\n"
+                f"Daily loss used: {p['daily_loss_pct']:.2f}% / 5%\n"
+                f"Total DD: {p['total_dd_pct']:.2f}% / 10%\n"
+                f"Balance: ${p['balance']:.2f} | Peak: ${p['peak']:.2f}\n"
+                f"Status: {'ON TRACK' if p['profit_pct'] >= 0 else 'RECOVERING'}")
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
+    @_bot.message_handler(commands=["history"])
+    def cmd_history(message):
+        if not _is_auth(message): return
+        try:
+            if not HISTORY_REPORT_FILE.exists():
+                _bot.reply_to(message, "History not analyzed yet. Running now..."); return
+            report = json.load(open(HISTORY_REPORT_FILE))
+            scores = []
+            for pair, tfs in report.items():
+                d = tfs.get("D1", {})
+                if d: scores.append((pair, d.get("win_rate",0), d.get("avg_rrr",0), d.get("expectancy",0)))
+            scores.sort(key=lambda x: x[3], reverse=True)
+            text = "=== 2Y HISTORY (D1) ===\n"
+            for p in scores[:10]:
+                text += f"{p[0]}: WR={p[1]:.0f}% RRR={p[2]:.1f} Exp={p[3]:.3f}\n"
+            _bot.reply_to(message, text)
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
+    @_bot.message_handler(commands=["best"])
+    def cmd_best(message):
+        if not _is_auth(message): return
+        try:
+            profiles = _load_profiles()
+            scored = [(pair, p) for pair, p in profiles.items() if p.get("trades", 0) > 0]
+            scored.sort(key=lambda x: x[1].get("total_r", 0), reverse=True)
+            if not scored:
+                _bot.reply_to(message, "No closed trades yet — no live ranking."); return
+            text = "=== BEST PAIRS (live) ===\n"
+            for pair, p in scored[:8]:
+                tr = p.get("trades",0)
+                wr = p.get("wins",0) / tr if tr else 0
+                text += f"{pair}: {tr}t WR={wr:.0%} TotR={p.get('total_r',0):.2f}\n"
+            _bot.reply_to(message, text)
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
+    @_bot.message_handler(commands=["evolution"])
+    def cmd_evolution(message):
+        if not _is_auth(message): return
+        try:
+            profiles = _load_profiles()
+            best = sorted(
+                [(p, v) for p, v in profiles.items() if v.get("trades", 0) > 0],
+                key=lambda x: x[1].get("total_r", 0), reverse=True)[:5]
+            text = f"Evolution iter: {_iteration}\nLearning profiles:\n"
+            if not best: text += "(no closed trades yet)\n"
+            for pair, v in best:
+                tr = v.get("trades",0)
+                wr = v.get("wins",0) / tr if tr else 0
+                text += f"{pair}: WR={wr:.0%} R={v.get('total_r',0):.2f}\n"
+            _bot.reply_to(message, text)
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
     @_bot.message_handler(commands=["help", "start"])
     def cmd_help(message):
         if not _is_auth(message): return
         _bot.reply_to(message,
-            "=== COMMANDS ===\n"
-            "/status  - full status\n"
-            "/balance - balance check\n"
-            "/trades  - open trades\n"
-            "/pause   - pause trading\n"
-            "/resume  - resume trading\n"
-            "/close   - close all trades\n"
-            "/stop    - emergency stop\n"
-            "/ram     - memory usage\n"
-            "/report  - send report\n"
-            "/help    - this menu")
+            "=== AUTOTRADER FTMO COMMANDS ===\n"
+            "/status    - full system status\n"
+            "/balance   - balance check\n"
+            "/progress  - FTMO progress\n"
+            "/trades    - open trades\n"
+            "/history   - 2y analysis\n"
+            "/best      - best pairs (live)\n"
+            "/evolution - evolution status\n"
+            "/pause     - pause trading\n"
+            "/resume    - resume trading\n"
+            "/close     - close all trades\n"
+            "/stop      - emergency stop\n"
+            "/ram       - memory usage\n"
+            "/report    - full report\n"
+            "/help      - this menu")
 
     log.info("Telegram bot starting infinity_polling...")
     while True:
@@ -1163,15 +1467,34 @@ def main_scan_loop():
     threading.Thread(target=scheduler_loop, daemon=True, name="scheduler").start()
     threading.Thread(target=start_telegram_bot, daemon=True, name="telebot").start()
 
-    # Start-up banner
+    # Persist start_balance for FTMO tracking (once)
     if ensure_mt5():
         info = _mt5.account_info()
+        s = load_state()
+        if "start_balance" not in s:
+            s["start_balance"] = info.balance
+            save_state(s)
+        # Run 2-year history once
+        if not HISTORY_REPORT_FILE.exists():
+            send_telegram("Reading 2-year history for all pairs...")
+            try:
+                read_all_history()
+            except Exception as e:
+                log.warning(f"history analysis error: {e}")
+        # Initialize FTMO state
+        check_ftmo_limits()
         send_telegram(
-            f"🚀 AUTOTRADER OMEGA v4.0 — ADAPTIVE\n"
-            f"MT5: Connected | Balance: ${info.balance:.2f}\n"
-            f"Pairs: {len(PAIRS)} | Sessions: London + NY\n"
-            f"Risk: 1%/trade | Max DD: 3% daily\n"
-            f"Target: ${START_BALANCE_TARGET:.0f}")
+            f"=== AUTOTRADER OMEGA FTMO LIVE ===\n"
+            f"FTMO Demo: {info.name}\n"
+            f"Balance: ${info.balance:.2f}\n"
+            f"Target: 10% profit (Phase 1)\n"
+            f"Risk: 0.25%–1% adaptive\n"
+            f"Max trades: 1 at a time\n"
+            f"Pairs: {len(PAIRS)}\n"
+            f"Sessions: London + NY (UTC)\n"
+            f"FTMO buffers: 3% daily / 7% total DD\n"
+            f"Evolution running 24/7\n"
+            f"Commands: /help")
 
     while _running:
         try:
@@ -1182,46 +1505,67 @@ def main_scan_loop():
             positions = _mt5.positions_get() or []
             open_omega = [p for p in positions if p.magic == 234000]
 
-            if TRADING_ENABLED and len(open_omega) < MAX_OPEN_TRADES and in_session() and check_daily_limit():
+            if TRADING_ENABLED and len(open_omega) < MAX_OPEN_TRADES and in_session() and check_ftmo_limits():
+                # Scan ALL pairs, collect candidates, pick HIGHEST confidence
+                candidates = []
                 for pair in PAIRS:
-                    if len(open_omega) >= MAX_OPEN_TRADES: break
-                    if not check_correlation(pair): continue
-
-                    condition = classify_market(pair)
-                    if condition.get("behavior") == "skip":
+                    try:
+                        if ensure_mt5(): _mt5.symbol_select(pair, True)
+                        if not check_correlation(pair): continue
+                        condition = classify_market(pair)
+                        if condition.get("behavior") == "skip": continue
+                        profile = get_profile(pair)
+                        entry = find_entry(pair, condition, profile)
+                        if not entry: continue
+                        candidates.append((entry["confidence"], pair, entry, condition))
+                    except Exception as e:
+                        log.debug(f"scan {pair}: {e}")
                         continue
-                    profile = get_profile(pair)
-                    entry = find_entry(pair, condition, profile)
-                    if not entry: continue
-
+                if candidates:
+                    candidates.sort(key=lambda x: x[0], reverse=True)
+                    _, pair, entry, condition = candidates[0]
                     sl_res = calculate_sl(pair, entry["direction"], condition)
-                    if sl_res is None: continue
-                    sl, sl_dist = sl_res
-
-                    info = _mt5.account_info()
-                    if info is None: continue
-                    lots = calculate_lots(pair, sl_dist, info.balance)
-                    tick = _mt5.symbol_info_tick(pair)
-                    if tick is None: continue
-                    entry_px = tick.ask if entry["direction"] == "buy" else tick.bid
-                    tp = calculate_tp(entry_px, sl_dist, entry["direction"], condition)
-                    rrr = abs(tp - entry_px) / sl_dist
-                    if rrr < MIN_RRR: continue
-
-                    result = place_trade(pair, entry["direction"], sl, tp, lots)
-                    if result and result.retcode == _mt5.TRADE_RETCODE_DONE:
-                        send_telegram(
-                            f"🎯 TRADE OPENED\n"
-                            f"Pair: {pair} | Direction: {entry['direction'].upper()}\n"
-                            f"Condition: {condition.get('condition')}\n"
-                            f"Confidence: {entry['confidence']:.0%}\n"
-                            f"Signals: {', '.join(entry['signals'])}\n"
-                            f"Entry: {entry_px:.5f}\n"
-                            f"SL: {sl:.5f} | TP: {tp:.5f} | RRR: {rrr:.2f}\n"
-                            f"Lots: {lots} | Risk: ${info.balance*MAX_RISK_PER_TRADE:.0f}\n"
-                            f"Balance: ${info.balance:.2f}")
-                        log.info(f"TRADE OPENED {pair} {entry['direction']} @{entry_px} SL={sl} TP={tp}")
-                        open_omega.append(result)
+                    if sl_res is not None:
+                        sl, sl_dist = sl_res
+                        info = _mt5.account_info()
+                        if info is not None:
+                            # Adaptive risk based on confidence
+                            risk_pct = calculate_risk_pct(entry["confidence"])
+                            # Lot calculation respecting selected risk
+                            pip_val = PIP_VALUE.get(pair, 10.0)
+                            risk_amt = info.balance * risk_pct
+                            if pair in ("BTCUSD","ETHUSD","NAS100","US30","GER40"):
+                                lots = risk_amt / max(sl_dist * pip_val, 0.01)
+                            elif "JPY" in pair:
+                                lots = risk_amt / max(sl_dist * 100 * pip_val, 0.01)
+                            elif pair in ("XAUUSD","XAGUSD"):
+                                lots = risk_amt / max(sl_dist * pip_val, 0.01)
+                            else:
+                                lots = risk_amt / max(sl_dist * 10000 * pip_val, 0.01)
+                            lots = max(0.01, min(round(lots, 2), 1.0))
+                            tick = _mt5.symbol_info_tick(pair)
+                            if tick is not None:
+                                entry_px = tick.ask if entry["direction"] == "buy" else tick.bid
+                                tp = calculate_tp(entry_px, sl_dist, entry["direction"], condition)
+                                rrr = abs(tp - entry_px) / sl_dist
+                                if rrr >= MIN_RRR:
+                                    result = place_trade(pair, entry["direction"], sl, tp, lots)
+                                    if result and result.retcode == _mt5.TRADE_RETCODE_DONE:
+                                        send_telegram(
+                                            f"=== TRADE OPENED ===\n"
+                                            f"Pair: {pair} | Direction: {entry['direction'].upper()}\n"
+                                            f"Condition: {condition.get('condition')}\n"
+                                            f"Confidence: {entry['confidence']:.0%}\n"
+                                            f"Signals: {', '.join(entry['signals'])}\n"
+                                            f"Entry: {entry_px:.5f}\n"
+                                            f"SL: {sl:.5f} | TP: {tp:.5f} | RRR: {rrr:.2f}\n"
+                                            f"Risk: {risk_pct*100:.2f}% = ${info.balance*risk_pct:.2f}\n"
+                                            f"Lots: {lots}\n"
+                                            f"Balance: ${info.balance:.2f}\n"
+                                            f"Target: 10% (FTMO Phase 1)\n"
+                                            f"====================")
+                                        log.info(f"TRADE OPENED {pair} {entry['direction']} @{entry_px} risk={risk_pct*100:.2f}%")
+                                        open_omega.append(result)
 
             _iteration += 1
             state["iteration"] = _iteration

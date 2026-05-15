@@ -8,5 +8,15 @@
     "trades": 1,
     "wins": 0,
     "total_r": -0.10121293582290164
+  },
+  "GBPJPY": {
+    "sweep": 1.0,
+    "fvg": 1.0,
+    "bos": 1.0,
+    "momentum": 1.0,
+    "breakout": 1.0,
+    "trades": 2,
+    "wins": 0,
+    "total_r": -1.1117228870787517
   }
 }

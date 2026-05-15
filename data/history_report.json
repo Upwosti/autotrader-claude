@@ -1,0 +1,236 @@
+{
+  "XAUUSD": {
+    "D1": {
+      "total_signals": 4,
+      "win_rate": 25.0,
+      "avg_rrr": 1.03,
+      "expectancy": -43.1276,
+      "trend_strength": 25.5,
+      "volatility_pct": 1.84
+    },
+    "H4": {
+      "total_signals": 36,
+      "win_rate": 33.3,
+      "avg_rrr": 2.37,
+      "expectancy": 5.1905,
+      "trend_strength": 54.9,
+      "volatility_pct": 0.873
+    }
+  },
+  "GBPUSD": {
+    "D1": {
+      "total_signals": 11,
+      "win_rate": 36.4,
+      "avg_rrr": 2.98,
+      "expectancy": 0.0038,
+      "trend_strength": 15.3,
+      "volatility_pct": 0.68
+    },
+    "H4": {
+      "total_signals": 41,
+      "win_rate": 24.4,
+      "avg_rrr": 2.73,
+      "expectancy": -0.0004,
+      "trend_strength": 72.5,
+      "volatility_pct": 0.269
+    }
+  },
+  "EURUSD": {
+    "D1": {
+      "total_signals": 13,
+      "win_rate": 15.4,
+      "avg_rrr": 3.24,
+      "expectancy": -0.0023,
+      "trend_strength": 11.5,
+      "volatility_pct": 0.65
+    },
+    "H4": {
+      "total_signals": 39,
+      "win_rate": 23.1,
+      "avg_rrr": 3.16,
+      "expectancy": -0.0001,
+      "trend_strength": 74.6,
+      "volatility_pct": 0.27
+    }
+  },
+  "USDJPY": {
+    "D1": {
+      "total_signals": 9,
+      "win_rate": 44.4,
+      "avg_rrr": 3.0,
+      "expectancy": 1.1073,
+      "trend_strength": 35.4,
+      "volatility_pct": 0.883
+    },
+    "H4": {
+      "total_signals": 45,
+      "win_rate": 24.4,
+      "avg_rrr": 3.21,
+      "expectancy": 0.0138,
+      "trend_strength": 7.4,
+      "volatility_pct": 0.329
+    }
+  },
+  "GBPJPY": {
+    "D1": {
+      "total_signals": 11,
+      "win_rate": 27.3,
+      "avg_rrr": 2.8,
+      "expectancy": 0.0794,
+      "trend_strength": 46.0,
+      "volatility_pct": 0.843
+    },
+    "H4": {
+      "total_signals": 41,
+      "win_rate": 19.5,
+      "avg_rrr": 2.61,
+      "expectancy": -0.2006,
+      "trend_strength": 51.2,
+      "volatility_pct": 0.304
+    }
+  },
+  "AUDUSD": {
+    "D1": {
+      "total_signals": 11,
+      "win_rate": 54.5,
+      "avg_rrr": 3.06,
+      "expectancy": 0.0071,
+      "trend_strength": 11.4,
+      "volatility_pct": 0.903
+    },
+    "H4": {
+      "total_signals": 41,
+      "win_rate": 34.1,
+      "avg_rrr": 2.82,
+      "expectancy": 0.0008,
+      "trend_strength": 22.0,
+      "volatility_pct": 0.364
+    }
+  },
+  "USDCAD": {
+    "D1": {
+      "total_signals": 11,
+      "win_rate": 36.4,
+      "avg_rrr": 2.43,
+      "expectancy": 0.0017,
+      "trend_strength": 28.8,
+      "volatility_pct": 0.507
+    },
+    "H4": {
+      "total_signals": 33,
+      "win_rate": 33.3,
+      "avg_rrr": 2.83,
+      "expectancy": 0.0008,
+      "trend_strength": 50.5,
+      "volatility_pct": 0.198
+    }
+  },
+  "USDCHF": {
+    "D1": {
+      "total_signals": 12,
+      "win_rate": 16.7,
+      "avg_rrr": 3.18,
+      "expectancy": -0.0017,
+      "trend_strength": 9.9,
+      "volatility_pct": 0.733
+    },
+    "H4": {
+      "total_signals": 41,
+      "win_rate": 22.0,
+      "avg_rrr": 3.07,
+      "expectancy": -0.0002,
+      "trend_strength": 54.0,
+      "volatility_pct": 0.309
+    }
+  },
+  "NZDUSD": {
+    "D1": {
+      "total_signals": 17,
+      "win_rate": 29.4,
+      "avg_rrr": 2.52,
+      "expectancy": 0.0002,
+      "trend_strength": 14.0,
+      "volatility_pct": 0.923
+    },
+    "H4": {
+      "total_signals": 34,
+      "win_rate": 32.4,
+      "avg_rrr": 2.93,
+      "expectancy": 0.0006,
+      "trend_strength": 34.2,
+      "volatility_pct": 0.373
+    }
+  },
+  "EURJPY": {
+    "D1": {
+      "total_signals": 11,
+      "win_rate": 27.3,
+      "avg_rrr": 2.99,
+      "expectancy": 0.1351,
+      "trend_strength": 48.2,
+      "volatility_pct": 0.797
+    },
+    "H4": {
+      "total_signals": 42,
+      "win_rate": 26.2,
+      "avg_rrr": 3.23,
+      "expectancy": 0.0536,
+      "trend_strength": 63.1,
+      "volatility_pct": 0.279
+    }
+  },
+  "BTCUSD": {
+    "D1": {
+      "total_signals": 13,
+      "win_rate": 23.1,
+      "avg_rrr": 2.7,
+      "expectancy": -425.3082,
+      "trend_strength": 44.0,
+      "volatility_pct": 3.499
+    },
+    "H4": {
+      "total_signals": 35,
+      "win_rate": 25.7,
+      "avg_rrr": 2.36,
+      "expectancy": -174.4616,
+      "trend_strength": 33.3,
+      "volatility_pct": 1.245
+    }
+  },
+  "ETHUSD": {
+    "D1": {
+      "total_signals": 11,
+      "win_rate": 18.2,
+      "avg_rrr": 2.86,
+      "expectancy": -44.3104,
+      "trend_strength": 27.6,
+      "volatility_pct": 5.347
+    },
+    "H4": {
+      "total_signals": 41,
+      "win_rate": 29.3,
+      "avg_rrr": 2.66,
+      "expectancy": 3.9277,
+      "trend_strength": 35.5,
+      "volatility_pct": 2.009
+    }
+  },
+  "XAGUSD": {
+    "D1": {
+      "total_signals": 14,
+      "win_rate": 21.4,
+      "avg_rrr": 1.13,
+      "expectancy": -0.8984,
+      "trend_strength": 24.3,
+      "volatility_pct": 4.117
+    },
+    "H4": {
+      "total_signals": 33,
+      "win_rate": 27.3,
+      "avg_rrr": 2.6,
+      "expectancy": -0.0196,
+      "trend_strength": 30.4,
+      "volatility_pct": 1.984
+    }
+  }
+}
