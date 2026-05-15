@@ -1,21 +1,21 @@
 {
-  "iteration": 10,
+  "iteration": 20,
   "best_wr": {},
   "best_expectancy": {},
   "best_score": {},
   "best_params": {},
   "no_improve": {
-    "XAUUSD": 10,
-    "GBPUSD": 9,
-    "EURUSD": 10,
-    "GBPJPY": 10,
-    "AUDUSD": 10,
-    "USDCAD": 10,
-    "BTCUSD": 10,
-    "ETHUSD": 10,
-    "XAGUSD": 10,
-    "USDJPY": 8
+    "XAUUSD": 20,
+    "GBPUSD": 19,
+    "EURUSD": 19,
+    "GBPJPY": 20,
+    "AUDUSD": 20,
+    "USDCAD": 20,
+    "BTCUSD": 20,
+    "ETHUSD": 19,
+    "XAGUSD": 20,
+    "USDJPY": 18
   },
   "current_params": {},
-  "saved": "2026-05-15T08:34:08.964496+00:00"
+  "saved": "2026-05-15T08:38:18.751462+00:00"
 }
