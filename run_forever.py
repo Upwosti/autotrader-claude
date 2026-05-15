@@ -163,20 +163,45 @@ def ensure_mt5() -> bool:
         _mt5_connected = connect_mt5()
     return _mt5_connected
 
-# ── Telegram ───────────────────────────────────────────────────────────────────
-def send_telegram(msg: str) -> bool:
-    if not TG_TOKEN or not TG_CHAT:
-        return False
+# ── Telegram (async queue + urgent path) ──────────────────────────────────────
+import queue as _queue
+_tg_queue: "_queue.Queue[str]" = _queue.Queue()
+
+def _tg_post(msg: str, timeout: int = 10) -> bool:
+    if not TG_TOKEN or not TG_CHAT: return False
     try:
         data = json.dumps({"chat_id": TG_CHAT, "text": msg}).encode("utf-8")
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
             data=data, headers={"Content-Type": "application/json; charset=utf-8"})
-        urllib.request.urlopen(req, timeout=15)
+        urllib.request.urlopen(req, timeout=timeout)
         return True
     except Exception as e:
-        log.debug(f"Telegram failed: {e}")
+        log.debug(f"Telegram POST failed: {e}")
         return False
+
+def _telegram_sender():
+    while True:
+        try:
+            msg = _tg_queue.get(timeout=1)
+            _tg_post(msg, timeout=15)
+        except _queue.Empty:
+            continue
+        except Exception as e:
+            log.debug(f"telegram sender: {e}")
+            time.sleep(2)
+
+def send_telegram(msg: str) -> bool:
+    """Non-blocking — enqueue and return immediately."""
+    try:
+        _tg_queue.put(str(msg))
+        return True
+    except Exception:
+        return False
+
+def send_telegram_urgent(msg: str) -> bool:
+    """Bypass queue — for trade events and critical alerts."""
+    return _tg_post(str(msg), timeout=8)
 
 # ── MT5 data fetcher ───────────────────────────────────────────────────────────
 _TF_MAP = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 16385, "H4": 16388, "D1": 16408}
@@ -562,11 +587,31 @@ def check_daily_limit() -> bool:
         return False
     return not d[today].get("paused", False)
 
+# ── Timing (NTP best-effort + UTC fallback) ────────────────────────────────────
+def get_utc_now() -> datetime:
+    try:
+        import ntplib
+        c = ntplib.NTPClient()
+        r = c.request("pool.ntp.org", version=3, timeout=3)
+        return datetime.fromtimestamp(r.tx_time, tz=timezone.utc)
+    except Exception:
+        return datetime.now(timezone.utc)
+
 # ── Session filter ─────────────────────────────────────────────────────────────
 def in_session() -> bool:
-    """London 07-10 UTC + NY 13-16 UTC."""
-    h = datetime.now(timezone.utc).hour
+    """London 07-10 UTC + NY 13-16 UTC, weekdays only."""
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5: return False  # weekend
+    h = now.hour
     return (7 <= h <= 10) or (13 <= h <= 16)
+
+# ── News blackout (NFP first Friday + month-end + custom) ──────────────────────
+def news_blackout_active() -> bool:
+    now = datetime.now(timezone.utc)
+    # NFP: first Friday of month, 12:00-14:00 UTC
+    if now.weekday() == 4 and now.day <= 7 and 12 <= now.hour < 14:
+        return True
+    return False
 
 # ── Pair profiles (learning) ───────────────────────────────────────────────────
 def _load_profiles() -> dict:
@@ -631,24 +676,70 @@ def place_trade(pair: str, direction: str, sl: float, tp: float, lots: float) ->
             return None
         if not info.visible:
             _mt5.symbol_select(pair, True)
+            time.sleep(0.5)
         tick = _mt5.symbol_info_tick(pair)
         if tick is None: return None
-        price = tick.ask if direction == "buy" else tick.bid
+
+        # Spread filter — skip if spread > 2× recent ATR / 100
+        try:
+            h1 = get_mt5_data(pair, "H1", 60)
+            if h1 is not None and len(h1) >= 20:
+                atr_v = float(atr(h1, 14).iloc[-1])
+                spread = tick.ask - tick.bid
+                max_spread = atr_v * 0.2  # ~20% of ATR
+                if spread > max_spread:
+                    log.info(f"Spread too high {pair}: {spread:.5f} > {max_spread:.5f}")
+                    return None
+        except Exception:
+            pass
+
+        digits = info.digits
+        price = round(tick.ask if direction == "buy" else tick.bid, digits)
+        sl_r  = round(float(sl), digits)
+        tp_r  = round(float(tp), digits)
         order_type = _mt5.ORDER_TYPE_BUY if direction == "buy" else _mt5.ORDER_TYPE_SELL
+
+        # Stop level distance check
+        stop_dist = info.trade_stops_level * info.point
+        if abs(price - sl_r) < stop_dist:
+            log.warning(f"SL too close to price {pair}: needed >{stop_dist}")
+            return None
+
         request = {
             "action": _mt5.TRADE_ACTION_DEAL, "symbol": pair, "volume": float(lots),
-            "type": order_type, "price": price, "sl": float(sl), "tp": float(tp),
-            "deviation": 20, "magic": 234000, "comment": "OMEGA_ADAPTIVE",
+            "type": order_type, "price": price, "sl": sl_r, "tp": tp_r,
+            "deviation": 30, "magic": 234000, "comment": "OmegaFTMO",
             "type_time": _mt5.ORDER_TIME_GTC, "type_filling": _mt5.ORDER_FILLING_IOC,
         }
+
+        # Pre-check (validates margin + stops without sending)
+        check = _mt5.order_check(request)
+        if check is None:
+            log.warning(f"order_check None {pair}")
+        elif check.retcode != 0:
+            log.info(f"order_check retcode {check.retcode} for {pair}: {check.comment}")
+            # Margin check
+            acct = _mt5.account_info()
+            if acct and check.margin > acct.margin_free * 0.9:
+                # Reduce lots
+                new_lots = max(info.volume_min, round(lots * 0.5, 2))
+                if new_lots < lots:
+                    log.info(f"Halving lots {pair}: {lots}→{new_lots} (margin)")
+                    request["volume"] = float(new_lots)
+                    check = _mt5.order_check(request)
+
         result = _mt5.order_send(request)
         if result is None:
             log.warning(f"order_send returned None for {pair}")
             return None
         if result.retcode != _mt5.TRADE_RETCODE_DONE:
-            # Try FOK if IOC rejected
+            # Try FOK fallback
             request["type_filling"] = _mt5.ORDER_FILLING_FOK
             result = _mt5.order_send(request)
+            if result and result.retcode != _mt5.TRADE_RETCODE_DONE:
+                # Try RETURN fallback
+                request["type_filling"] = _mt5.ORDER_FILLING_RETURN
+                result = _mt5.order_send(request)
         return result
     except Exception as e:
         log.warning(f"place_trade error {pair}: {e}")
@@ -795,8 +886,8 @@ def monitor_positions_loop():
                     risk = (info.balance if info else 5000) * MAX_RISK_PER_TRADE
                     rr = pnl / risk if risk > 0 else 0
                     log.info(f"Position {d.position_id} closed: pnl={pnl:.2f} R={rr:.2f}")
-                    send_telegram(
-                        f"{'🟢 WIN' if won else '🔴 LOSS'} {d.symbol}\n"
+                    send_telegram_urgent(
+                        f"{'WIN' if won else 'LOSS'} {d.symbol}\n"
                         f"PnL: ${pnl:+.2f} | R: {rr:+.2f}\n"
                         f"Balance: ${info.balance if info else 0:.2f}")
                     # Learning update (we don't have signals here; best-effort)
@@ -1348,6 +1439,26 @@ def start_telegram_bot():
         except Exception as e:
             _bot.reply_to(message, f"Error: {e}")
 
+    @_bot.message_handler(commands=["ftmo"])
+    def cmd_ftmo(message):
+        if not _is_auth(message): return
+        try:
+            p = get_ftmo_progress()
+            if not p: _bot.reply_to(message, "MT5 disconnected"); return
+            safe_d = max(0, 3 - p["daily_loss_pct"])
+            safe_t = max(0, 7 - p["total_dd_pct"])
+            status = "SAFE" if p["total_dd_pct"] < 7 and p["daily_loss_pct"] < 3 else "WARNING"
+            _bot.reply_to(message,
+                f"=== FTMO STATUS ===\n"
+                f"Profit: {p['profit_pct']:+.2f}% / 10% target\n"
+                f"Daily loss: {p['daily_loss_pct']:.2f}% / 5% FTMO\n"
+                f"Total DD: {p['total_dd_pct']:.2f}% / 10% FTMO\n"
+                f"Safe daily remaining: {safe_d:.2f}%\n"
+                f"Safe DD remaining: {safe_t:.2f}%\n"
+                f"Status: {status}")
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
     @_bot.message_handler(commands=["progress"])
     def cmd_progress(message):
         if not _is_auth(message): return
@@ -1462,6 +1573,7 @@ def main_scan_loop():
     _iteration = state.get("iteration", 0)
 
     # Background threads
+    threading.Thread(target=_telegram_sender, daemon=True, name="tg_sender").start()
     threading.Thread(target=monitor_positions_loop, daemon=True, name="monitor").start()
     threading.Thread(target=evolution_loop, daemon=True, name="evolution").start()
     threading.Thread(target=scheduler_loop, daemon=True, name="scheduler").start()
@@ -1505,7 +1617,7 @@ def main_scan_loop():
             positions = _mt5.positions_get() or []
             open_omega = [p for p in positions if p.magic == 234000]
 
-            if TRADING_ENABLED and len(open_omega) < MAX_OPEN_TRADES and in_session() and check_ftmo_limits():
+            if TRADING_ENABLED and len(open_omega) < MAX_OPEN_TRADES and in_session() and not news_blackout_active() and check_ftmo_limits():
                 # Scan ALL pairs, collect candidates, pick HIGHEST confidence
                 candidates = []
                 for pair in PAIRS:
@@ -1551,7 +1663,7 @@ def main_scan_loop():
                                 if rrr >= MIN_RRR:
                                     result = place_trade(pair, entry["direction"], sl, tp, lots)
                                     if result and result.retcode == _mt5.TRADE_RETCODE_DONE:
-                                        send_telegram(
+                                        send_telegram_urgent(
                                             f"=== TRADE OPENED ===\n"
                                             f"Pair: {pair} | Direction: {entry['direction'].upper()}\n"
                                             f"Condition: {condition.get('condition')}\n"
