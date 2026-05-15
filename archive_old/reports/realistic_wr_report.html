@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AutoTrader — Realistic WR Rebuild Report</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #0d1117; color: #c9d1d9; padding: 30px; }
+  h1 { color: #58a6ff; font-size: 26px; border-bottom: 2px solid #21262d; padding-bottom: 12px; margin-bottom: 20px; }
+  h2 { color: #3fb950; font-size: 18px; margin: 28px 0 10px; }
+  h3 { color: #e3b341; font-size: 15px; margin: 18px 0 8px; }
+  p  { line-height: 1.7; color: #8b949e; margin-bottom: 10px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 18px 22px; margin: 12px 0; }
+  .card.red   { border-left: 4px solid #f85149; }
+  .card.green { border-left: 4px solid #3fb950; }
+  .card.amber { border-left: 4px solid #e3b341; }
+  .card.blue  { border-left: 4px solid #58a6ff; }
+  .card h3 { margin-top: 0; }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+  .stat { background: #21262d; border-radius: 8px; padding: 14px 20px; text-align: center; min-width: 130px; flex: 1; }
+  .stat-val { font-size: 28px; font-weight: bold; }
+  .stat-val.blue  { color: #58a6ff; }
+  .stat-val.green { color: #3fb950; }
+  .stat-val.red   { color: #f85149; }
+  .stat-val.amber { color: #e3b341; }
+  .stat-label { font-size: 12px; color: #8b949e; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+  th { background: #21262d; color: #58a6ff; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-size: 13px; }
+  td { padding: 9px 14px; border: 1px solid #30363d; font-size: 13px; }
+  tr:nth-child(even) td { background: #161b22; }
+  code { background: #21262d; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 13px; color: #79c0ff; }
+  .arrow { color: #58a6ff; font-weight: bold; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
+  .tag.old { background: #3d1f1f; color: #f85149; }
+  .tag.new { background: #1f3d1f; color: #3fb950; }
+  .formula { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px 18px; font-family: monospace; font-size: 14px; color: #e3b341; margin: 10px 0; }
+  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #30363d; color: #484f58; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>🎯 AutoTrader OMEGA — Realistic WR Rebuild</h1>
+<p>Generated: 2026-05-15 | Commit: <code>8b18ced</code> | Engine restarted with new rules</p>
+
+<h2>Why the Win Rate Was Fake (80%+ = Unrealistic)</h2>
+
+<div class="card red">
+  <h3>🐛 Bug 1 — WR Lock-In Loop (Primary Cause)</h3>
+  <p>Once XAUUSD reached 86.2% WR, the acceptance floor was set to <code>86.2% × 0.90 = 77.6%</code>.
+  This meant the system could <strong>never again accept any result below 77.6% WR</strong> — even if a
+  60% WR / 2.5 RRR strategy had much higher expectancy (E=1.175R vs E=0.615R at 86%/0.9R).</p>
+  <p><strong>Effect:</strong> System locked into WR-farming. Better strategies were permanently blocked.</p>
+  <p><strong>Fix:</strong> Replaced <code>best_wr × 0.90 floor</code> with a flat realistic band: <strong>55% – 75%</strong>.
+  Score (expectancy-first) determines acceptance, not WR alone.</p>
+</div>
+
+<div class="card red">
+  <h3>🐛 Bug 2 — Tight SL on Daily Bars</h3>
+  <p>The best XAUUSD params used <code>sl_atr_mult = 0.75</code> — the SL was placed just 0.75×ATR
+  below entry on a <em>daily</em> bar. A typical D1 ATR for XAUUSD is $15-20. With a $11-15 SL,
+  intraday wicks would frequently touch the SL but the candle closes above it.
+  The backtester uses bar OHLC — it <em>does</em> check the bar's low against the SL — but:
+  when the daily candle closes above SL (after an intraday wick), the trade stays open.
+  This means many real-life stop-outs are not captured.</p>
+  <p><strong>Fix:</strong> SL range changed from <code>[0.3, 0.5, 0.75, 1.0, 1.5]</code> to
+  <code>[1.0, 1.5, 2.0, 2.5, 3.0]</code>. Realistic D1 SL is 1.5-2.5×ATR to survive intraday noise.</p>
+</div>
+
+<div class="card red">
+  <h3>🐛 Bug 3 — TP/SL Same-Bar Always Assumed TP Won</h3>
+  <p>When a daily candle's high hits the TP level <em>and</em> the low hits the SL level (both in
+  the same bar), the old code always resolved it as a <strong>win</strong>. In reality, the outcome
+  depends on which price was hit first during the trading day.</p>
+  <p><strong>Fix:</strong> Use bar direction to determine order:
+  <ul style="color:#8b949e; margin: 8px 0 0 20px; line-height:2">
+    <li>Bullish bar (close ≥ open) → TP likely hit first → <strong>Win</strong></li>
+    <li>Bearish bar (close &lt; open) → SL likely hit first → <strong>Loss</strong></li>
+  </ul>
+  </p>
+</div>
+
+<h2>All Changes Made</h2>
+
+<table>
+  <tr><th>What</th><th>Before</th><th>After</th><th>Impact</th></tr>
+  <tr>
+    <td>WR acceptance floor</td>
+    <td><code>best_wr × 0.90</code> (lock-in)</td>
+    <td>Flat band: 55%–75%</td>
+    <td>System can find 62% WR / 2.5 RRR strategies</td>
+  </tr>
+  <tr>
+    <td>WR upper cap</td>
+    <td>None (80%+ accepted)</td>
+    <td>75% cap — above = curve-fit warning</td>
+    <td>Prevents overfitted high-WR junk from locking in</td>
+  </tr>
+  <tr>
+    <td>sl_atr_mult range</td>
+    <td>[0.3, 0.5, 0.75, 1.0, 1.5]</td>
+    <td>[1.0, 1.5, 2.0, 2.5, 3.0]</td>
+    <td>Realistic D1 stop placement</td>
+  </tr>
+  <tr>
+    <td>Default sl_atr_mult</td>
+    <td>0.75</td>
+    <td>1.5</td>
+    <td>Starting point is already realistic</td>
+  </tr>
+  <tr>
+    <td>TP/SL same-bar resolution</td>
+    <td>Always TP wins</td>
+    <td>Bar direction determines order</td>
+    <td>More conservative, realistic WR</td>
+  </tr>
+  <tr>
+    <td>RRR floor</td>
+    <td>1.0</td>
+    <td>1.5</td>
+    <td>Enforces genuine edge requirement</td>
+  </tr>
+  <tr>
+    <td>Score RRR bonus threshold</td>
+    <td>rrr &gt; 1.5</td>
+    <td>rrr &gt; 2.0</td>
+    <td>Stronger incentive for high-RR strategies</td>
+  </tr>
+  <tr>
+    <td>Slippage</td>
+    <td>0.5 pips/fill</td>
+    <td>1.0 pips/fill</td>
+    <td>Realistic D1 market order execution</td>
+  </tr>
+  <tr>
+    <td>Engine state</td>
+    <td>WR locked at 86%+</td>
+    <td>Reset — fresh search</td>
+    <td>Warm start with existing best params</td>
+  </tr>
+</table>
+
+<h2>Target Performance Profile</h2>
+
+<div class="stats">
+  <div class="stat">
+    <div class="stat-val blue">60–65%</div>
+    <div class="stat-label">Target Win Rate</div>
+  </div>
+  <div class="stat">
+    <div class="stat-val green">2.0–3.0</div>
+    <div class="stat-label">Target RRR</div>
+  </div>
+  <div class="stat">
+    <div class="stat-val amber">1.0–1.4R</div>
+    <div class="stat-label">Target Expectancy/trade</div>
+  </div>
+  <div class="stat">
+    <div class="stat-val green">&lt; 10%</div>
+    <div class="stat-label">Max Drawdown</div>
+  </div>
+  <div class="stat">
+    <div class="stat-val blue">&gt; 1.3</div>
+    <div class="stat-label">Min Profit Factor</div>
+  </div>
+</div>
+
+<div class="formula">
+E = WR × RRR − (1 − WR)<br>
+Example: 0.63 × 2.5 − 0.37 = <strong>1.205R per trade</strong><br><br>
+Old fake result: 0.86 × 0.92 − 0.14 = <strong>0.651R per trade</strong><br>
+→ Realistic 63% WR / 2.5 RRR = <span style="color:#3fb950">+85% more edge than 86% WR / 0.92 RRR</span>
+</div>
+
+<h2>8 OMEGA Acceptance Checks (Updated)</h2>
+
+<table>
+  <tr><th>#</th><th>Check</th><th>Threshold</th><th>Change</th></tr>
+  <tr><td>0</td><td>Min trades</td><td>≥ 15</td><td>Unchanged</td></tr>
+  <tr><td>1</td><td>WR minimum</td><td>≥ 55%</td><td>Unchanged</td></tr>
+  <tr><td>1b</td><td>WR maximum</td><td>≤ 75% (D1 cap)</td><td>NEW — prevents curve-fit lock-in</td></tr>
+  <tr><td>2</td><td>RRR floor</td><td>≥ 1.5</td><td>Raised from 1.0</td></tr>
+  <tr><td>3</td><td>Max drawdown</td><td>&lt; 10%</td><td>Relaxed from 8% (wider SL)</td></tr>
+  <tr><td>4</td><td>Profit Factor</td><td>&gt; 1.3</td><td>Unchanged</td></tr>
+  <tr><td>5</td><td>No overfit</td><td>+ auto-reset after 30 strikes</td><td>Auto-reset added last session</td></tr>
+  <tr><td>6</td><td>Positive expectancy</td><td>E &gt; 0</td><td>Unchanged</td></tr>
+  <tr><td>7</td><td>Beat current best score</td><td>E + max(0, RRR−2.0)×0.15</td><td>Bonus threshold raised to 2.0</td></tr>
+  <tr><td>8</td><td>Monte Carlo survival</td><td>&gt; 65%</td><td>Unchanged</td></tr>
+</table>
+
+<h2>System Status</h2>
+
+<div class="card green">
+  <h3>✅ Engine Restarted — All Changes Live</h3>
+  <p>The engine is running under the new realistic rules. It will take 1-3 hours to find its first
+  accepted results (smaller WR means more signals generated, more trades in test window, less overfit).</p>
+  <p>Telegram will notify on first KEPT result. Use <code>/status</code> to check anytime.</p>
+</div>
+
+<div class="card amber">
+  <h3>⚠️ Email Still Requires Gmail App Password</h3>
+  <p>Go to <a href="https://myaccount.google.com/apppasswords" style="color:#58a6ff">myaccount.google.com/apppasswords</a>
+  → Generate App Password for Mail/Windows → Update <code>EMAIL_PASSWORD</code> in <code>.env</code></p>
+</div>
+
+<footer>
+  AutoTrader OMEGA-1 | Commit 8b18ced | 2026-05-15 | Engine PID: 5024
+</footer>
+
+</body>
+</html>

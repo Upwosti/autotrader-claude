@@ -1,1707 +1,1059 @@
 """
-AutoTrader Engine v5.0 — Single file. Runs forever. No Claude needed.
+AutoTrader OMEGA — Clean Rebuild v3.0
+Self-contained. Simple. Stable. Runs forever.
 
-Iron Rules:
-  1. WR floor per pair — never accept below best ever achieved
-  2. RRR floor 1.3 — always
-  3. Score = WR * RRR — combined must improve
-  4. Walk-forward only — no training data in test
-  5. Costs always — spread + slippage + commission
-  6. Monte Carlo — 1000 shuffles, 70% survival minimum
-  7. Stuck 50 → random restart | Stuck 100 → new strategy type
-
-Usage:
-    python run_forever.py
+Target: 60-75% WR | 2.0-5.0 RRR | Expectancy positive and growing
+MT5 Demo paper trading | 4H bars | 12 pairs
 """
 
-import copy
-import json
-import os
-import random
-import smtplib
-import subprocess
-import sys
-import threading
-import time
-import traceback
-from collections import deque
-from datetime import datetime, timezone, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import os, sys, json, time, gc, signal, logging, subprocess, smtplib, ssl
+import random, copy
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import urllib.request
 
 import numpy as np
-from dotenv import load_dotenv
-from loguru import logger
+import pandas as pd
 
-# ── Bootstrap ──────────────────────────────────────────────────────────────────
-_ROOT = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(_ROOT, ".env"), override=True)
-sys.path.insert(0, _ROOT)
+# ── Never die on SIGTERM ───────────────────────────────────────────────────────
+def _handle_signal(sig, frame):
+    logging.warning(f"Signal {sig} received — staying alive")
 
-LOG_DIR   = os.path.join(_ROOT, "logs")
-STATE_DIR = os.path.join(_ROOT, "local_db")
-DATA_DIR  = os.path.join(_ROOT, "data_cache")
-for d in (LOG_DIR, STATE_DIR, DATA_DIR):
-    os.makedirs(d, exist_ok=True)
+signal.signal(signal.SIGTERM, _handle_signal)
+try:
+    signal.signal(signal.SIGHUP, _handle_signal)
+except AttributeError:
+    pass  # Windows
 
-logger.remove()
-logger.add(sys.stderr,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
-    level="INFO", colorize=True)
-logger.add(os.path.join(LOG_DIR, "engine_{time:YYYY-MM-DD}.log"),
-    rotation="00:00", retention="30 days", level="DEBUG",
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{line} | {message}")
+# ── Logging ────────────────────────────────────────────────────────────────────
+ROOT    = Path(__file__).parent
+LOGDIR  = ROOT / "logs"
+LOGDIR.mkdir(exist_ok=True)
+LOG_FILE = LOGDIR / f"engine_{datetime.now().strftime('%Y-%m-%d')}.log"
 
-# ── Credentials ────────────────────────────────────────────────────────────────
-TG_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TG_CHAT    = os.environ.get("TELEGRAM_CHAT_ID", "")
-EMAIL_FROM = os.environ.get("EMAIL_SENDER", os.environ.get("EMAIL_USER", ""))
-EMAIL_PASS = os.environ.get("EMAIL_PASSWORD", "")
-EMAIL_TO   = os.environ.get("EMAIL_RECEIVER", os.environ.get("EMAIL_RECIPIENT", ""))
-SMTP_HOST  = os.environ.get("EMAIL_SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT  = int(os.environ.get("EMAIL_SMTP_PORT", 587))
-GH_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
-GH_USER    = os.environ.get("GITHUB_USERNAME", "")
-GH_REPO    = os.environ.get("GITHUB_REPO", "autotrader-claude")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
+)
+log = logging.getLogger(__name__)
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-STATE_FILE   = os.path.join(STATE_DIR, "engine_state.json")
-SKILLS_FILE  = os.path.join(STATE_DIR, "skills.json")
-MONTHLY_FILE = os.path.join(STATE_DIR, "monthly_backtest.json")
+# ── Load .env ──────────────────────────────────────────────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env", override=True)
+except ImportError:
+    pass
 
-TARGET_WR    = 0.65   # Realistic target: 60-65% WR with 2.0-3.0 RRR
-TARGET_RRR   = 2.0    # Minimum acceptable realized RRR
-RRR_FLOOR    = 1.5    # Hard floor: reject anything below 1.5 avg realized RRR
-MIN_WR_FLOOR = 0.55   # Absolute WR floor — anything below 55% is noise
-MAX_WR_CAP   = 0.75   # Anything above 75% WR is likely curve-fitted — flag it
-STUCK_RESTART = 50    # random restart threshold per pair
-STUCK_STRATEGY = 100  # new strategy type threshold
-GITHUB_EVERY  = 10    # sync every N iterations
-REPORT_EVERY  = 100   # full ranking report interval
-MONTE_N       = 1000  # Monte Carlo shuffles
-MONTE_MIN     = 0.65  # min MC survival rate
+MT5_LOGIN    = int(os.environ.get("MT5_LOGIN", 0) or 0)
+MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
+MT5_SERVER   = os.environ.get("MT5_SERVER", "")
+TG_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT      = os.environ.get("TELEGRAM_CHAT_ID", "")
+GH_TOKEN     = os.environ.get("GITHUB_TOKEN", "")
+GH_USER      = os.environ.get("GITHUB_USER", "Upwosti")
+GH_REPO      = os.environ.get("GITHUB_REPO", "autotrader-claude")
+EMAIL_FROM   = os.environ.get("EMAIL_SENDER", "")
+EMAIL_PASS   = os.environ.get("EMAIL_PASSWORD", "")
+EMAIL_TO     = os.environ.get("EMAIL_RECEIVER", "")
 
-# ── Pairs ──────────────────────────────────────────────────────────────────────
+# ── Pairs & mappings ───────────────────────────────────────────────────────────
 PAIRS = [
-    "XAUUSD", "XAGUSD", "XPTUSD",
-    "GBPUSD", "EURUSD", "USDJPY", "USDCHF",
-    "AUDUSD", "NZDUSD", "USDCAD",
-    "EURJPY", "GBPJPY",
-    "BTCUSD", "ETHUSD",
-    "NAS100", "US30", "GER40",
-    "GC=F", "SI=F",
+    "XAUUSD", "GBPUSD", "EURUSD", "USDJPY", "GBPJPY",
+    "AUDUSD", "USDCAD", "BTCUSD", "ETHUSD", "NAS100", "US30", "XAGUSD",
 ]
 
-PAIR_TICKERS = {
-    "XAUUSD": "GC=F",  "XAGUSD": "SI=F",  "XPTUSD": "PL=F",
-    "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
-    "NAS100": "^IXIC",  "US30": "^DJI",    "GER40": "^GDAXI",
-    "GBPUSD": "GBPUSD=X", "EURUSD": "EURUSD=X", "USDJPY": "USDJPY=X",
-    "USDCHF": "USDCHF=X", "AUDUSD": "AUDUSD=X", "NZDUSD": "NZDUSD=X",
-    "USDCAD": "USDCAD=X", "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X",
+MT5_SYMBOL_MAP = {
+    "XAUUSD": "XAUUSD", "GBPUSD": "GBPUSD", "EURUSD": "EURUSD",
+    "USDJPY": "USDJPY", "GBPJPY": "GBPJPY", "AUDUSD": "AUDUSD",
+    "USDCAD": "USDCAD", "BTCUSD": "BTCUSD", "ETHUSD": "ETHUSD",
+    "NAS100": "NAS100", "US30": "US30",     "XAGUSD": "XAGUSD",
 }
 
-PAIR_PERIODS = {
-    "XAUUSD": "10y", "XAGUSD": "10y", "GC=F": "10y", "SI=F": "10y",
-    "XPTUSD": "5y",  "BTCUSD": "5y",  "ETHUSD": "5y",
-    "NAS100": "5y",  "US30": "5y",    "GER40": "5y",
+YF_TICKERS = {
+    "XAUUSD": "GC=F",      "GBPUSD": "GBPUSD=X", "EURUSD": "EURUSD=X",
+    "USDJPY": "USDJPY=X",  "GBPJPY": "GBPJPY=X", "AUDUSD": "AUDUSD=X",
+    "USDCAD": "USDCAD=X",  "BTCUSD": "BTC-USD",  "ETHUSD": "ETH-USD",
+    "NAS100": "^IXIC",     "US30":   "^DJI",      "XAGUSD": "SI=F",
 }
 
-PAIR_WEIGHTS = {
-    "XAUUSD": 5.0, "GC=F": 5.0,
-    "XAGUSD": 1.5, "SI=F": 1.5, "XPTUSD": 1.0,
-    "BTCUSD": 1.5, "ETHUSD": 1.0,
-    "GBPUSD": 1.0, "EURUSD": 1.0, "USDJPY": 1.0,
-    "USDCHF": 0.8, "AUDUSD": 0.8, "NZDUSD": 0.8, "USDCAD": 0.8,
-    "EURJPY": 0.8, "GBPJPY": 0.8,
-    "NAS100": 0.6, "US30": 0.6, "GER40": 0.6,
+# Spread per pair (price units, realistic)
+SPREAD = {
+    "XAUUSD": 0.30, "XAGUSD": 0.035, "GBPUSD": 0.00008,
+    "EURUSD": 0.00006, "USDJPY": 0.07, "GBPJPY": 0.15,
+    "AUDUSD": 0.00009, "USDCAD": 0.00010, "BTCUSD": 15.0,
+    "ETHUSD": 0.80, "NAS100": 1.0, "US30": 2.0,
 }
 
-# ── Parameter search space ─────────────────────────────────────────────────────
-# REALISTIC SL: D1 bars need 1.5-2.5× ATR to avoid intraday noise stops.
-# Tight SL (0.5×ATR) on D1 is the #1 cause of fake 80%+ WR in backtests.
+# Lot sizes for risk calculation
+LOT_SIZE = {
+    "XAUUSD": 100, "XAGUSD": 5000, "GBPUSD": 100000,
+    "EURUSD": 100000, "USDJPY": 100000, "GBPJPY": 100000,
+    "AUDUSD": 100000, "USDCAD": 100000, "BTCUSD": 1,
+    "ETHUSD": 1, "NAS100": 1, "US30": 1,
+}
+
+# ── Parameter space ────────────────────────────────────────────────────────────
 PARAM_RANGES = {
-    "ema_fast":         [8, 13, 21, 34],
-    "ema_slow":         [34, 50, 55, 89, 100, 144],
-    "ema_long":         [150, 200, 233],
-    "atr_period":       [10, 14, 20],
-    # Realistic D1 SL: 1.5-3.0×ATR gives genuine 60-65% WR in live trading
-    "sl_atr_mult":      [1.0, 1.5, 2.0, 2.5, 3.0],
-    # TP: 3R-8R runners — wide TP + good trail = high RRR
-    "tp_rrr":           [2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0],
-    # Trail: 2.0-4.0×ATR for D1 — tight trail kills runners
-    "trail_atr_mult":   [1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
-    # Partial: 25% or 0% — keep most of position running
-    "partial_pct_1r":   [0.0, 0.15, 0.25],
-    "min_adx":          [15.0, 20.0, 25.0, 30.0],
-    "rsi_long_min":     [25.0, 30.0, 35.0, 40.0],
-    "rsi_long_max":     [55.0, 60.0, 65.0, 68.0, 70.0],
-    "rsi_short_min":    [30.0, 32.0, 35.0],
-    "rsi_short_max":    [60.0, 65.0, 70.0, 72.0, 75.0],
-    "min_confluence":   [2, 3, 4],
-    "min_hold_bars":    [1, 2, 3],
-    "use_pattern":      [True, False],
-    "use_adx_filter":   [True, False],
-    "use_weekly_filter":[True, False],
-    "use_ema_stack":    [True, False],
-    "use_expansion":    [True, False],
+    "ema_fast":       [8, 13, 21, 34],
+    "ema_slow":       [34, 50, 89, 144],
+    "rsi_period":     [10, 14, 21],
+    "rsi_long_max":   [55, 60, 65, 68],
+    "rsi_short_min":  [32, 35, 40, 45],
+    "atr_period":     [10, 14, 21],
+    "sl_atr_mult":    [0.3, 0.4, 0.5, 0.6, 0.8],
+    "tp_rrr":         [2.0, 2.5, 3.0, 4.0, 5.0],
+    "trail_atr_mult": [1.0, 1.5, 2.0, 2.5],
+    "partial1_r":     [1.5, 2.0],
+    "partial2_r":     [2.5, 3.0],
+    "min_adx":        [20, 25, 30],
+    "use_adx":        [True, False],
+    "use_ema_stack":  [True, False],
+    "min_confluence": [2, 3, 4],
 }
 
 PARAM_PRIORITIES = [
-    "sl_atr_mult",                          # #1: wider SL = realistic WR
-    "tp_rrr", "trail_atr_mult",             # #2: bigger TP + smart trail = high RRR
-    "partial_pct_1r",                       # #3: keep runners alive
-    "min_confluence",
-    "use_ema_stack", "use_weekly_filter",
-    "rsi_long_max", "rsi_short_min", "min_adx",
-    "use_adx_filter", "use_pattern",
-    "ema_fast", "ema_slow", "ema_long",
-    "min_hold_bars", "rsi_long_min", "rsi_short_max", "use_expansion",
-    "atr_period",
+    "tp_rrr", "sl_atr_mult", "trail_atr_mult",
+    "partial1_r", "partial2_r", "min_confluence",
+    "ema_fast", "ema_slow", "rsi_long_max",
+    "min_adx", "use_adx", "use_ema_stack",
+    "rsi_period", "atr_period", "rsi_short_min",
 ]
 
+STATE_FILE     = ROOT / "state.json"
+EMAIL_TRACKER  = ROOT / "email_tracker.json"
+MAX_OPEN_TRADES = 2
+RISK_PER_TRADE  = 0.01   # 1% of account
 
-# ── Utility functions ──────────────────────────────────────────────────────────
+# ── MT5 connection ─────────────────────────────────────────────────────────────
+_mt5           = None
+_mt5_connected = False
+_mt5_last_try  = 0.0
 
-def send_telegram(msg: str) -> None:
-    if not TG_TOKEN or not TG_CHAT:
-        return
+
+def connect_mt5() -> bool:
+    global _mt5, _mt5_connected, _mt5_last_try
+    _mt5_last_try = time.time()
     try:
-        import ssl
-        import urllib.request
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        data = json.dumps({"chat_id": TG_CHAT, "text": msg[:4000],
-                           "parse_mode": "HTML"}).encode()
-        req = urllib.request.Request(url, data=data,
-            headers={"Content-Type": "application/json"}, method="POST")
+        import MetaTrader5 as mt5
+        _mt5 = mt5
+        if not mt5.initialize():
+            log.warning(f"MT5 initialize failed: {mt5.last_error()}")
+            return False
+        if MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+            ok = mt5.login(MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
+            if not ok:
+                log.warning(f"MT5 login failed: {mt5.last_error()}")
+                mt5.shutdown()
+                return False
+        info = mt5.account_info()
+        if info is None:
+            log.warning("MT5 account_info is None — not connected")
+            mt5.shutdown()
+            return False
+        log.info(f"MT5 connected | {info.name} | {info.server} | Balance: ${info.balance:,.2f}")
+        _mt5_connected = True
+        return True
+    except ImportError:
+        log.warning("MetaTrader5 library not installed — install with: pip install MetaTrader5")
+        return False
+    except Exception as e:
+        log.warning(f"MT5 connect error: {e}")
+        return False
+
+
+def ensure_mt5() -> bool:
+    """Return True if MT5 connected. Retry every 60s."""
+    global _mt5_connected
+    if _mt5_connected and _mt5 is not None:
+        try:
+            info = _mt5.account_info()
+            if info is not None:
+                return True
+        except Exception:
+            pass
+        _mt5_connected = False
+    if time.time() - _mt5_last_try > 60:
+        _mt5_connected = connect_mt5()
+    return _mt5_connected
+
+
+# ── Data cache ─────────────────────────────────────────────────────────────────
+_data_cache: Dict[str, tuple] = {}
+CACHE_TTL = 6 * 3600  # 6 hours
+
+
+def get_data(pair: str) -> Optional[pd.DataFrame]:
+    """4H OHLCV. MT5 primary → yfinance fallback. Cache 6h."""
+    now = time.time()
+    if pair in _data_cache:
+        df_c, ts = _data_cache[pair]
+        if now - ts < CACHE_TTL:
+            return df_c
+
+    df = None
+
+    # ── MT5 path ───────────────────────────────────────────────────────────────
+    if ensure_mt5() and _mt5 is not None:
+        try:
+            symbol = MT5_SYMBOL_MAP.get(pair, pair)
+            rates  = _mt5.copy_rates_from_pos(symbol, _mt5.TIMEFRAME_H4, 0, 2500)
+            if rates is not None and len(rates) > 200:
+                df = pd.DataFrame(rates)
+                df["time"] = pd.to_datetime(df["time"], unit="s")
+                df.set_index("time", inplace=True)
+                df = df[["open", "high", "low", "close", "tick_volume"]].rename(
+                    columns={"tick_volume": "volume"})
+                log.debug(f"MT5 data {pair}: {len(df)} 4H bars")
+        except Exception as e:
+            log.debug(f"MT5 data error {pair}: {e}")
+            df = None
+
+    # ── yfinance fallback ──────────────────────────────────────────────────────
+    if df is None or len(df) < 200:
+        try:
+            import yfinance as yf
+            ticker = YF_TICKERS.get(pair, pair)
+            raw = yf.download(ticker, period="2y", interval="1h",
+                              progress=False, auto_adjust=True)
+            if raw is not None and len(raw) > 200:
+                raw.columns = [c[0].lower() if isinstance(c, tuple) else c.lower()
+                               for c in raw.columns]
+                df = raw.resample("4h").agg({
+                    "open": "first", "high": "max",
+                    "low": "min", "close": "last", "volume": "sum"
+                }).dropna()
+                if len(df) > 200:
+                    log.debug(f"yfinance data {pair}: {len(df)} 4H bars")
+        except Exception as e:
+            log.debug(f"yfinance error {pair}: {e}")
+
+    if df is not None and len(df) > 200:
+        _data_cache[pair] = (df.copy(), now)
+        return df
+
+    return None
+
+
+# ── Technical indicators ───────────────────────────────────────────────────────
+def add_indicators(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    df = df.copy()
+    ef = int(params.get("ema_fast", 21))
+    es = int(params.get("ema_slow", 89))
+    rp = int(params.get("rsi_period", 14))
+    ap = int(params.get("atr_period", 14))
+
+    df["ema_fast"] = df["close"].ewm(span=ef, adjust=False).mean()
+    df["ema_slow"] = df["close"].ewm(span=es, adjust=False).mean()
+    df["ema_200"]  = df["close"].ewm(span=200, adjust=False).mean()
+
+    # RSI
+    delta = df["close"].diff()
+    gain  = delta.clip(lower=0).ewm(span=rp, adjust=False).mean()
+    loss  = (-delta.clip(upper=0)).ewm(span=rp, adjust=False).mean()
+    rs    = gain / loss.replace(0, 1e-9)
+    df["rsi"] = 100 - 100 / (1 + rs)
+
+    # ATR
+    hl  = df["high"] - df["low"]
+    hc  = (df["high"] - df["close"].shift()).abs()
+    lc  = (df["low"]  - df["close"].shift()).abs()
+    tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    df["atr"] = tr.ewm(span=ap, adjust=False).mean()
+
+    # ADX
+    pdm = df["high"].diff().clip(lower=0)
+    ndm = (-df["low"].diff()).clip(lower=0)
+    pdm = pdm.where(pdm > ndm, 0.0)
+    ndm = ndm.where(ndm > pdm, 0.0)
+    atr_s  = tr.ewm(span=ap, adjust=False).mean()
+    pdi    = 100 * pdm.ewm(span=ap, adjust=False).mean() / atr_s.replace(0, 1e-9)
+    ndi    = 100 * ndm.ewm(span=ap, adjust=False).mean() / atr_s.replace(0, 1e-9)
+    dx     = 100 * (pdi - ndi).abs() / (pdi + ndi).replace(0, 1e-9)
+    df["adx"] = dx.ewm(span=ap, adjust=False).mean()
+
+    return df
+
+
+def generate_signals(df: pd.DataFrame, params: dict) -> List[dict]:
+    """Generate long/short entry signals from indicator crossovers."""
+    df = add_indicators(df, params)
+
+    rsi_long_max  = float(params.get("rsi_long_max",  65))
+    rsi_short_min = float(params.get("rsi_short_min", 35))
+    min_adx       = float(params.get("min_adx",       25))
+    use_adx       = bool(params.get("use_adx",       True))
+    use_ema_stack = bool(params.get("use_ema_stack", True))
+    min_conf      = int(params.get("min_confluence",   3))
+    atr_arr       = df["atr"].values
+    close_arr     = df["close"].values
+    n             = len(df)
+
+    signals = []
+    for i in range(210, n):
+        ef_prev = df["ema_fast"].iloc[i - 1]
+        es_prev = df["ema_slow"].iloc[i - 1]
+        ef_cur  = df["ema_fast"].iloc[i]
+        es_cur  = df["ema_slow"].iloc[i]
+        rsi_cur = df["rsi"].iloc[i]
+        adx_cur = df["adx"].iloc[i]
+        atr_cur = df["atr"].iloc[i]
+        cl_cur  = df["close"].iloc[i]
+        em200   = df["ema_200"].iloc[i]
+
+        if pd.isna(atr_cur) or atr_cur <= 0:
+            continue
+
+        # ATR expanding vs 20-bar avg
+        atr_avg = atr_arr[max(0, i - 20):i].mean()
+        atr_ok  = atr_cur > atr_avg * 0.8
+
+        # Long signal
+        cross_long  = ef_prev < es_prev and ef_cur >= es_cur
+        if cross_long:
+            conf = sum([
+                rsi_cur < rsi_long_max,
+                (adx_cur >= min_adx) if use_adx else True,
+                (cl_cur > em200) if use_ema_stack else True,
+                cl_cur > ef_cur,
+                atr_ok,
+            ])
+            if conf >= min_conf:
+                signals.append({"idx": i, "direction": "long",
+                                "close": float(cl_cur), "atr": float(atr_cur)})
+
+        # Short signal
+        cross_short = ef_prev > es_prev and ef_cur <= es_cur
+        if cross_short:
+            conf = sum([
+                rsi_cur > rsi_short_min,
+                (adx_cur >= min_adx) if use_adx else True,
+                (cl_cur < em200) if use_ema_stack else True,
+                cl_cur < ef_cur,
+                atr_ok,
+            ])
+            if conf >= min_conf:
+                signals.append({"idx": i, "direction": "short",
+                                "close": float(cl_cur), "atr": float(atr_cur)})
+
+    return signals
+
+
+# ── Backtester ─────────────────────────────────────────────────────────────────
+def run_backtest(df: pd.DataFrame, pair: str, params: dict) -> Optional[dict]:
+    """
+    70/30 walk-forward backtest with realistic partial exits.
+    Exit structure: 25% at partial1_r, 25% at partial2_r, 50% runner with trail.
+    Returns dict with wr, avg_win, avg_loss, pf, dd, avg_rrr, trades.
+    """
+    df_ind = add_indicators(df, params)
+    signals = generate_signals(df, params)
+
+    if len(signals) < 10:
+        return None
+
+    split   = int(len(df) * 0.70)
+    t_sigs  = [s for s in signals if s["idx"] >= split]
+
+    if len(t_sigs) < 8:
+        return None
+
+    # Overfit check via train signals
+    tr_sigs = [s for s in signals if s["idx"] < split]
+
+    spread_val = SPREAD.get(pair, 0.0001)
+    sl_mult    = float(params.get("sl_atr_mult",    0.5))
+    tp_rrr     = float(params.get("tp_rrr",         3.0))
+    trail_m    = float(params.get("trail_atr_mult",  1.5))
+    p1_r       = float(params.get("partial1_r",     1.5))
+    p2_r       = float(params.get("partial2_r",     2.5))
+
+    def simulate(sigs: list) -> List[dict]:
+        trades = []
+        for s in sigs:
+            idx       = s["idx"]
+            atr       = s["atr"]
+            direction = s["direction"]
+            entry_raw = s["close"]
+
+            if direction == "long":
+                entry = entry_raw + spread_val
+                sl_p  = entry - sl_mult * atr
+            else:
+                entry = entry_raw - spread_val
+                sl_p  = entry + sl_mult * atr
+
+            risk = abs(entry - sl_p)
+            if risk <= 0 or risk > entry * 0.20:
+                continue
+
+            if direction == "long":
+                tp_p = entry + tp_rrr * risk
+                p1_p = entry + p1_r  * risk
+                p2_p = entry + p2_r  * risk
+            else:
+                tp_p = entry - tp_rrr * risk
+                p1_p = entry - p1_r  * risk
+                p2_p = entry - p2_r  * risk
+
+            p1_done = p2_done = False
+            partial_pnl = 0.0
+            trail = sl_p
+            pnl_r = None
+
+            for j in range(idx + 1, min(idx + 250, len(df_ind))):
+                bar   = df_ind.iloc[j]
+                hi    = float(bar["high"])
+                lo    = float(bar["low"])
+                cl    = float(bar["close"])
+                op    = float(bar.get("open", (hi + lo) / 2))
+                atr_j = float(bar["atr"]) if not pd.isna(bar["atr"]) else atr
+
+                # Partial 1 — 25% at p1_r
+                if not p1_done:
+                    hit1 = (direction == "long" and hi >= p1_p) or \
+                           (direction == "short" and lo <= p1_p)
+                    if hit1:
+                        partial_pnl += 0.25 * p1_r
+                        p1_done = True
+                        trail = entry  # move SL to breakeven
+
+                # Partial 2 — 25% at p2_r
+                if p1_done and not p2_done:
+                    hit2 = (direction == "long" and hi >= p2_p) or \
+                           (direction == "short" and lo <= p2_p)
+                    if hit2:
+                        partial_pnl += 0.25 * p2_r
+                        p2_done = True
+
+                # Update trailing stop
+                if p1_done and atr_j > 0:
+                    if direction == "long":
+                        trail = max(trail, cl - trail_m * atr_j)
+                    else:
+                        trail = min(trail, cl + trail_m * atr_j)
+
+                cur_sl = trail if p1_done else sl_p
+
+                sl_hit = (direction == "long"  and lo <= cur_sl) or \
+                         (direction == "short" and hi >= cur_sl)
+                tp_hit = (direction == "long"  and hi >= tp_p) or \
+                         (direction == "short" and lo <= tp_p)
+
+                if sl_hit or tp_hit:
+                    if tp_hit and not sl_hit:
+                        pnl_r = partial_pnl + 0.50 * tp_rrr
+                    elif sl_hit and not tp_hit:
+                        if p1_done:
+                            runner_rrr = abs(cur_sl - entry) / risk if risk > 0 else 0
+                            if direction == "short":
+                                runner_rrr = abs(entry - cur_sl) / risk if risk > 0 else 0
+                            pnl_r = partial_pnl + 0.50 * (runner_rrr if cur_sl != sl_p else -1.0)
+                        else:
+                            pnl_r = -1.0
+                    else:
+                        # Both hit same bar — use bar direction
+                        bar_bull = cl >= op
+                        if (direction == "long" and bar_bull) or (direction == "short" and not bar_bull):
+                            pnl_r = partial_pnl + 0.50 * tp_rrr
+                        else:
+                            pnl_r = partial_pnl - (0.50 if p1_done else 1.0)
+                    break
+
+            if pnl_r is None:
+                # Timed out — close at last bar
+                last = float(df_ind.iloc[min(idx + 249, len(df_ind) - 1)]["close"])
+                raw  = (last - entry) / risk if direction == "long" else (entry - last) / risk
+                pnl_r = (partial_pnl + 0.50 * raw) if p1_done else raw
+
+            trades.append({"pnl_r": round(pnl_r, 4),
+                           "win":  pnl_r > 0})
+        return trades
+
+    test_trades  = simulate(t_sigs)
+    train_trades = simulate(tr_sigs)
+
+    if len(test_trades) < 8:
+        return None
+
+    def stats(trades):
+        if not trades:
+            return None
+        wins   = [t["pnl_r"] for t in trades if t["win"]]
+        losses = [t["pnl_r"] for t in trades if not t["win"]]
+        n      = len(trades)
+        wr     = len(wins) / n
+        avg_w  = sum(wins)  / max(len(wins),   1)
+        avg_l  = abs(sum(losses) / max(len(losses), 1))
+        pf     = sum(wins) / max(abs(sum(losses)), 1e-9) if losses else 99.0
+        # Max drawdown
+        eq, peak, dd = 0.0, 0.0, 0.0
+        for t in trades:
+            eq += t["pnl_r"]
+            if eq > peak:
+                peak = eq
+            dd = max(dd, (peak - eq) / max(abs(peak), 1e-9))
+        avg_rrr = sum(abs(w) for w in wins) / max(len(wins), 1)
+        return {"wr": wr, "avg_w": avg_w, "avg_l": avg_l,
+                "pf": pf, "dd": dd, "avg_rrr": avg_rrr, "n": n}
+
+    s   = stats(test_trades)
+    tr  = stats(train_trades)
+    if s is None:
+        return None
+
+    # Overfit guard: if train WR >> test WR, reject
+    if tr and tr["wr"] - s["wr"] > 0.20 and tr["wr"] > 0.65:
+        return None
+
+    return {
+        "wr":       round(s["wr"],     4),
+        "avg_win":  round(s["avg_w"],  4),
+        "avg_loss": round(s["avg_l"],  4),
+        "pf":       round(s["pf"],     3),
+        "dd":       round(s["dd"],     4),
+        "avg_rrr":  round(s["avg_rrr"],3),
+        "trades":   s["n"],
+        "train_wr": round(tr["wr"], 4) if tr else s["wr"],
+    }
+
+
+# ── Telegram ───────────────────────────────────────────────────────────────────
+def send_telegram(msg: str) -> bool:
+    if not TG_TOKEN or not TG_CHAT:
+        return False
+    try:
+        body = json.dumps({"chat_id": TG_CHAT, "text": msg[:4096]}).encode()
+        req  = urllib.request.Request(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            data=body, headers={"Content-Type": "application/json"}, method="POST")
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         urllib.request.urlopen(req, timeout=10, context=ctx)
+        return True
     except Exception as e:
-        logger.debug(f"Telegram failed: {e}")
+        log.debug(f"Telegram error: {e}")
+        return False
 
 
-_EMAIL_TRACKER_PATH = os.path.join(_ROOT, "data", "email_tracker.json")
-
-def _email_already_sent(key: str) -> bool:
-    """Return True if this email key was already sent today."""
+# ── Email ──────────────────────────────────────────────────────────────────────
+def _email_sent_today(key: str) -> bool:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
-        if os.path.exists(_EMAIL_TRACKER_PATH):
-            with open(_EMAIL_TRACKER_PATH) as f:
-                tracker = json.load(f)
-        else:
-            tracker = {}
-        return tracker.get(key) == today
+        tr = json.load(open(EMAIL_TRACKER)) if EMAIL_TRACKER.exists() else {}
+        return tr.get(key) == today
     except Exception:
         return False
 
-def _mark_email_sent(key: str) -> None:
+
+def _mark_email(key: str):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
-        if os.path.exists(_EMAIL_TRACKER_PATH):
-            with open(_EMAIL_TRACKER_PATH) as f:
-                tracker = json.load(f)
-        else:
-            tracker = {}
-        tracker[key] = today
-        with open(_EMAIL_TRACKER_PATH, "w") as f:
-            json.dump(tracker, f)
+        tr = json.load(open(EMAIL_TRACKER)) if EMAIL_TRACKER.exists() else {}
+        tr[key] = today
+        json.dump(tr, open(EMAIL_TRACKER, "w"))
     except Exception:
         pass
 
-def send_email(subject: str, body_html: str, dedup_key: str = "") -> None:
+
+def send_email(subject: str, body: str, key: str = "") -> bool:
     if not EMAIL_FROM or not EMAIL_PASS or not EMAIL_TO:
-        return
-    # Deduplication: skip if already sent today with same key
-    key = dedup_key or subject[:50]
-    if _email_already_sent(key):
-        logger.debug(f"Email skipped (already sent today): {key}")
-        return
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = EMAIL_FROM
-    msg["To"]      = EMAIL_TO
-    msg.attach(MIMEText(body_html, "html"))
-
-    sent = False
-
-    # Method 1: SSL on port 465 (most reliable with Gmail App Passwords)
+        return False
+    k = key or subject[:40]
+    if _email_sent_today(k):
+        return False
     try:
-        import ssl as _ssl
-        ctx = _ssl.create_default_context()
-        with smtplib.SMTP_SSL(SMTP_HOST, 465, timeout=30, context=ctx) as s:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = EMAIL_FROM
+        msg["To"]      = EMAIL_TO
+        msg.attach(MIMEText(body, "html"))
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30, context=ctx) as s:
             s.login(EMAIL_FROM, EMAIL_PASS)
             s.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-        sent = True
-    except Exception as e1:
-        logger.debug(f"Email SSL/465 failed: {e1}")
-
-    # Method 2: STARTTLS on configured port (587)
-    if not sent:
-        try:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
-                s.ehlo()
-                s.starttls()
-                s.ehlo()
-                s.login(EMAIL_FROM, EMAIL_PASS)
-                s.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-            sent = True
-        except Exception as e2:
-            logger.debug(f"Email STARTTLS/587 failed: {e2}")
-            # Give actionable guidance once per day
-            if "BadCredentials" in str(e2) or "535" in str(e2):
-                logger.warning(
-                    "Email auth failed (BadCredentials). "
-                    "Gmail requires an App Password — go to "
-                    "https://myaccount.google.com/apppasswords, "
-                    "generate a 16-char password, and set EMAIL_PASSWORD=<app_password> in .env"
-                )
-
-    if sent:
-        _mark_email_sent(key)
-        logger.info(f"Email sent: {subject}")
-    else:
-        logger.debug(f"Email skipped (all methods failed) — subject: {subject}")
-
-
-def github_sync(iteration: int, xau_wr: float) -> None:
-    if not GH_TOKEN:
-        return
-    try:
-        cwd = _ROOT
-        msg = f"iter{iteration} XAU_WR={xau_wr:.1%}"
-        subprocess.run(["git", "add", "-A"], cwd=cwd, capture_output=True, timeout=30)
-        subprocess.run(["git", "commit", "-m", msg], cwd=cwd, capture_output=True, timeout=30)
-        remote = f"https://{GH_TOKEN}@github.com/{GH_USER}/{GH_REPO}.git"
-        result = subprocess.run(
-            ["git", "push", remote, "HEAD:master"],
-            cwd=cwd, capture_output=True, timeout=60)
-        if result.returncode == 0:
-            logger.info(f"GitHub sync: {msg}")
-        else:
-            logger.debug(f"GitHub push: {result.stderr.decode()[:200]}")
-    except Exception as e:
-        logger.debug(f"GitHub sync failed: {e}")
-
-
-# ── Telegram Command Handler ────────────────────────────────────────────────────
-
-_tg_offset = 0
-_engine_paused = False
-
-def _poll_telegram_commands(engine) -> None:
-    """Poll getUpdates and execute commands. Call from scheduler thread."""
-    global _tg_offset, _engine_paused
-    if not TG_TOKEN:
-        return
-    try:
-        import ssl, urllib.request
-        url = (f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
-               f"?offset={_tg_offset}&timeout=2&limit=10")
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(url, timeout=8, context=ctx) as r:
-            data = json.loads(r.read())
-        if not data.get("ok"):
-            return
-        for upd in data.get("result", []):
-            _tg_offset = upd["update_id"] + 1
-            msg = upd.get("message", {}).get("text", "").strip().lower()
-            if not msg.startswith("/"):
-                continue
-            cmd = msg.split()[0]
-            reply = _handle_command(cmd, engine)
-            if reply:
-                send_telegram(reply)
-    except Exception:
-        pass
-
-def _handle_command(cmd: str, engine) -> str:
-    global _engine_paused
-    try:
-        if cmd == "/status":
-            top = sorted(engine.best_wr.items(), key=lambda x: x[1], reverse=True)[:5]
-            pairs_str = " | ".join(f"{p} {w:.1%}" for p, w in top)
-            return (f"AUTOTRADER STATUS\n"
-                    f"Iter: {engine.iteration:,}\n"
-                    f"XAUUSD WR: {engine.xauusd_best_wr:.1%}\n"
-                    f"Paused: {_engine_paused}\n"
-                    f"Top: {pairs_str}")
-        elif cmd == "/pause":
-            _engine_paused = True
-            return "Engine PAUSED — no new entries."
-        elif cmd == "/resume":
-            _engine_paused = False
-            return "Engine RESUMED."
-        elif cmd == "/stop":
-            _engine_paused = True
-            return "Engine PAUSED via /stop. Use /resume to restart."
-        elif cmd == "/ram":
-            try:
-                import psutil
-                m = psutil.virtual_memory()
-                used = m.used / 1024**3
-                pct  = m.percent
-                return f"RAM: {used:.1f}GB / {m.total/1024**3:.1f}GB ({pct:.1f}%)"
-            except Exception:
-                return "RAM: psutil not available"
-        elif cmd == "/best":
-            top = sorted(engine.best_wr.items(), key=lambda x: x[1], reverse=True)[:10]
-            lines = [f"TOP PAIRS BY WR"]
-            for p, w in top:
-                rr = engine.best_rrr.get(p, 0)
-                exp = w * rr - (1 - w)
-                lines.append(f"{p}: WR {w:.1%} RR {rr:.2f} E={exp:.3f}")
-            return "\n".join(lines)
-        elif cmd == "/report":
-            try:
-                from evolution.evolution_engine import get_engine as _get_evo
-                return _get_evo().generate_report()
-            except Exception:
-                top = sorted(engine.best_wr.items(), key=lambda x: x[1], reverse=True)
-                lines = [f"REPORT — iter {engine.iteration:,}"]
-                for p, w in top:
-                    rr  = engine.best_rrr.get(p, 0)
-                    exp = w * rr - (1 - w)
-                    lines.append(f"{p}: WR={w:.1%} RR={rr:.2f} E={exp:.3f}")
-                return "\n".join(lines)
-        elif cmd == "/audit":
-            import psutil
-            ram = psutil.virtual_memory().percent if _try_import("psutil") else 0
-            return (f"AUDIT\nIter: {engine.iteration:,}\n"
-                    f"Pairs: {len(engine.best_wr)}\nRAM: {ram:.1f}%\n"
-                    f"Git: master\nPaused: {_engine_paused}")
-        elif cmd == "/risk":
-            lines = ["RISK MULTIPLIERS"]
-            if engine._drift_monitor:
-                for p, m in engine._drift_monitor._risk_overrides.items():
-                    if m < 1.0:
-                        lines.append(f"{p}: x{m:.2f}")
-            if len(lines) == 1:
-                lines.append("All pairs at 1.0x")
-            return "\n".join(lines)
-        elif cmd == "/close_all":
-            return "CLOSE_ALL: No live MT5 positions active (demo mode). Use MT5 terminal."
-        elif cmd == "/cpu":
-            try:
-                import psutil
-                cpu = psutil.cpu_percent(interval=1)
-                return f"CPU: {cpu:.1f}%"
-            except Exception:
-                return "CPU: psutil not available"
-        elif cmd == "/iter":
-            return f"Iteration: {engine.iteration:,}"
-        elif cmd == "/restart":
-            _engine_paused = False
-            return "Engine unpaused. Watchdog will restart if needed."
-        elif cmd == "/safemode":
-            _engine_paused = True
-            return ("SAFE MODE ACTIVE\n"
-                    "Engine paused. No new iterations.\n"
-                    "Use /resume to exit safe mode.")
-        else:
-            return (f"Commands: /status /pause /resume /stop /close_all\n"
-                    f"/report /best /ram /cpu /iter /audit /risk\n"
-                    f"/restart /safemode")
-    except Exception as e:
-        return f"Command error: {e}"
-
-def _try_import(mod: str) -> bool:
-    try:
-        __import__(mod)
+        _mark_email(k)
+        log.info(f"Email sent: {subject}")
         return True
-    except ImportError:
+    except Exception as e:
+        log.debug(f"Email failed: {e}")
         return False
 
 
-# ── Main Engine ────────────────────────────────────────────────────────────────
+# ── Git sync ───────────────────────────────────────────────────────────────────
+def git_push(iteration: int, note: str = "") -> bool:
+    if not GH_TOKEN:
+        return False
+    try:
+        cwd = str(ROOT)
+        subprocess.run(["git", "add", "-A"], cwd=cwd, capture_output=True, timeout=30)
+        msg = f"iter{iteration}" + (f" {note}" if note else "")
+        subprocess.run(["git", "commit", "-m", msg], cwd=cwd, capture_output=True, timeout=30)
+        remote = f"https://{GH_TOKEN}@github.com/{GH_USER}/{GH_REPO}.git"
+        for branch in ["master", "main"]:
+            r = subprocess.run(
+                ["git", "push", remote, f"HEAD:{branch}"],
+                cwd=cwd, capture_output=True, timeout=60)
+            if r.returncode == 0:
+                log.info(f"Git push: {msg}")
+                return True
+        log.debug("Git push failed both branches")
+        return False
+    except Exception as e:
+        log.debug(f"Git push error: {e}")
+        return False
 
-class AutoTraderEngine:
+
+# ── RAM check ──────────────────────────────────────────────────────────────────
+def get_ram_pct() -> float:
+    try:
+        import psutil
+        return psutil.virtual_memory().percent
+    except ImportError:
+        return 0.0
+
+
+# ── AutoTrader ─────────────────────────────────────────────────────────────────
+class AutoTrader:
 
     def __init__(self):
-        # --- Per-pair state (never goes down) ---
-        self.best_wr:     Dict[str, float] = {}   # WR floor per pair
-        self.best_rrr:    Dict[str, float] = {}   # RRR floor per pair
-        self.best_score:  Dict[str, float] = {}   # WR*RRR floor per pair
-        self.best_params: Dict[str, dict]  = {}   # best params per pair
-        self.best_result: Dict[str, dict]  = {}   # full result per pair
+        self.iteration      : int              = 0
+        self.best_wr        : Dict[str, float] = {}
+        self.best_expectancy: Dict[str, float] = {}
+        self.best_score     : Dict[str, float] = {}
+        self.best_params    : Dict[str, dict]  = {}
+        self.no_improve     : Dict[str, int]   = {}
+        self.current_params : Dict[str, dict]  = {}
+        self.running        : bool             = True
+        self._last_trade_check = 0.0
+        self._last_hour_log    = 0.0
+        self._open_trades: List[dict] = []
 
-        # --- Global counters ---
-        self.iteration:       int   = 0
-        self.xauusd_best_wr:  float = 0.0
-        self.global_best_score: float = 0.0
-
-        # --- Per-pair stuck counters ---
-        self.no_improve: Dict[str, int]  = {}
-        self.pair_iter:  Dict[str, int]  = {}     # iters since last improvement
-        self.overfit_strikes: Dict[str, int] = {} # consecutive overfit rejections per pair
-
-        # --- Smart mutation state ---
-        # param_momentum[pair][param] = deque of (delta_score) last 5 changes
-        self.param_momentum: Dict[str, Dict[str, deque]] = {}
-        self.last_changed:   Dict[str, str] = {}   # last param changed per pair
-        self.last_direction: Dict[str, int] = {}   # +1 or -1
-
-        # --- Current working params per pair ---
-        self.current_params: Dict[str, dict] = {}
-
-        # --- Data cache ---
-        self.data_cache:       Dict = {}
-        self.data_cache_time:  float = 0.0
-
-        # --- Skills library ---
-        self.skills: dict = {}
-
-        # --- Monthly backtest db ---
-        self.monthly_db: dict = {}
-
-        # --- Schedule tracking ---
-        self._last_30min = 0.0
-        self._last_2h    = 0.0
-        self._last_6h    = 0.0
-        self._last_24h   = 0.0
-        self._last_github = 0
-
-        # --- Import heavy modules once ---
-        self._wf_cls   = None   # WalkForwardBacktester class
-        self._tp_cls   = None   # TrendParams class
-
-        # --- Phase 3-8 engines (lazy-init) ---
-        self._drift_monitor   = None   # analytics.live_drift_monitor.LiveDriftMonitor
-        self._exposure_engine = None   # portfolio.live_exposure_engine.LiveExposureEngine
-        self._news_filter     = None   # risk.news_volatility_filter.NewsVolatilityFilter
-        self._paper_engine    = None   # execution.paper_trading.PaperTradingEngine
-        self._wf_validator    = None   # validation.walk_forward_validator.WalkForwardValidator
-        self._resource_mon    = None   # core.resource_monitor.ResourceMonitor
-        self._last_drift_check = 0.0
-        self._last_validation  = 0.0
-
-    # ── Entry point ────────────────────────────────────────────────────────────
-
-    def run_forever(self):
-        logger.info("=" * 60)
-        logger.info("AutoTrader Engine v5.0 — STARTING")
-        logger.info("=" * 60)
-
-        self._import_modules()
         self.load_state()
-        self._refresh_data(force=True)
+        connect_mt5()
+        log.info("=" * 55)
+        log.info("AutoTrader OMEGA v3.0 — Clean Rebuild")
+        log.info(f"Pairs: {len(PAIRS)} | State: iter {self.iteration}")
+        log.info("=" * 55)
 
+    # ── Main loop ──────────────────────────────────────────────────────────────
+    def run_forever(self):
         send_telegram(
-            f"=== AUTOTRADER ENGINE v5.0 ===\n"
-            f"Resumed iter: {self.iteration}\n"
-            f"XAUUSD WR: {self.xauusd_best_wr:.1%}\n"
-            f"Pairs: {len(PAIRS)}\n"
-            f"Running forever. No Claude needed."
+            f"🚀 AutoTrader OMEGA v3.0 STARTED\n"
+            f"Pairs: {len(PAIRS)} | iter: {self.iteration}\n"
+            f"MT5: {'Connected' if _mt5_connected else 'Offline (retry every 60s)'}\n"
+            f"Target: 60-75% WR | 2.0-5.0 RRR | Max DD 8%\n"
+            f"Use /status /pause /resume /stop /report"
         )
-
-        # Start background scheduler
-        t = threading.Thread(target=self._scheduler_loop, daemon=True)
-        t.start()
-
-        while True:
+        while self.running:
             try:
-                # Pause gate
-                if _engine_paused:
-                    time.sleep(5)
-                    continue
-
-                # Resource check every 10 iterations
-                if self._resource_mon and self.iteration % 10 == 0:
-                    snap = self._resource_mon.check()
-                    if snap.status == "critical":
-                        logger.warning("[ENGINE] Resource critical — sleeping 30s")
-                        time.sleep(30)
-
-                self.evolve_one_iteration()
-                self.save_state()
+                self.evolve()
                 self.iteration += 1
+                self.save_state()
 
-                if self.iteration % GITHUB_EVERY == 0:
-                    github_sync(self.iteration, self.xauusd_best_wr)
+                if self.iteration % 10 == 0:
+                    git_push(self.iteration)
 
-                if self.iteration % REPORT_EVERY == 0:
-                    self._send_full_report()
+                if self.iteration % 50 == 0:
+                    self.send_telegram_report()
+
+                # Hourly MT5 connection log
+                if time.time() - self._last_hour_log > 3600:
+                    self._log_hourly()
+
+                # Check for live paper trades every 4 hours
+                if time.time() - self._last_trade_check > 4 * 3600:
+                    self.check_and_trade()
+                    self._last_trade_check = time.time()
+
+                # Scheduled emails
+                self.send_email_if_scheduled()
+
+                # Resource guard
+                self.check_resources()
 
             except KeyboardInterrupt:
-                logger.info("Stopped by Ctrl+C")
+                log.info("Ctrl+C — stopping gracefully")
                 self.save_state()
+                send_telegram("🛑 AutoTrader stopped by keyboard interrupt.")
                 break
             except Exception as e:
-                self.heal(e)
-                continue
+                log.error(f"Main loop error: {e}", exc_info=True)
+                time.sleep(30)
+                continue  # NEVER STOP
 
-    # ── Core evolution ─────────────────────────────────────────────────────────
+    # ── Evolution ─────────────────────────────────────────────────────────────
+    def evolve(self):
+        for pair in PAIRS:
+            try:
+                data = get_data(pair)
+                if data is None:
+                    continue
 
-    def evolve_one_iteration(self):
-        # Rotate through pairs — XAUUSD gets 3x more iterations
-        pair = self._pick_pair()
+                params = self.mutate(pair)
+                result = run_backtest(data, pair, params)
+                if result is None:
+                    continue
 
-        params = self.smart_mutate(pair)
-        result = self._run_backtest(pair, params)
+                if self.is_better(pair, result):
+                    self.accept(pair, params, result)
+                    wr  = result["wr"]
+                    exp = wr * result["avg_win"] - (1 - wr) * result["avg_loss"]
+                    log.info(
+                        f"✅ KEPT [{pair}] WR={wr:.1%} RRR={result['avg_rrr']:.2f} "
+                        f"E={exp:.3f} PF={result['pf']:.2f} DD={result['dd']:.1%} "
+                        f"trades={result['trades']}"
+                    )
+                else:
+                    self.no_improve[pair] = self.no_improve.get(pair, 0) + 1
+                    ni = self.no_improve[pair]
+                    if ni == 50:
+                        self._random_restart(pair)
+                    elif ni == 100:
+                        self._new_strategy(pair)
 
-        if result is None:
-            return
+                gc.collect()
 
-        if self.is_better(pair, result):
-            old_wr = self.best_wr.get(pair, 0)
-            self.accept(pair, params, result)
-            new_wr = self.best_wr[pair]
-            logger.info(
-                f"KEPT [{pair}] WR {old_wr:.1%}→{new_wr:.1%} | "
-                f"RRR {result.get('avg_rrr', 0):.2f} | "
-                f"Score {result.get('score', 0):.4f} | "
-                f"iter {self.iteration}"
-            )
-            if pair == "XAUUSD" and new_wr >= TARGET_WR and old_wr < TARGET_WR:
-                send_telegram(
-                    f"★★★ TARGET REACHED ★★★\n"
-                    f"XAUUSD WR = {new_wr:.1%}\n"
-                    f"Still evolving — pushing higher."
-                )
-        else:
-            self.no_improve[pair] = self.no_improve.get(pair, 0) + 1
-            logger.info(
-                f"REVERTED [{pair}] WR {result.get('win_rate', 0):.1%} "
-                f"RRR {result.get('avg_rrr', 0):.2f} "
-                f"trades {result.get('trades', 0)} "
-                f"vs best WR {self.best_wr.get(pair, 0):.1%} score {self.best_score.get(pair, 0):.3f} | "
-                f"no_improve={self.no_improve[pair]}"
-            )
-            # Stuck detection
-            ni = self.no_improve[pair]
-            if ni == STUCK_RESTART:
-                self._random_restart(pair)
-            elif ni == STUCK_STRATEGY:
-                self._new_strategy_type(pair)
+            except Exception as e:
+                log.warning(f"[{pair}] evolve error: {e}")
+                continue  # skip pair, never stop
 
-    def _pick_pair(self) -> str:
-        """XAUUSD 3x weight, others 1x. Rotate deterministically."""
-        weighted = (["XAUUSD"] * 3) + [p for p in PAIRS if p != "XAUUSD"]
-        return weighted[self.iteration % len(weighted)]
-
+    # ── Acceptance ────────────────────────────────────────────────────────────
     def is_better(self, pair: str, result: dict) -> bool:
-        """
-        Realistic acceptance: 60-65% WR + 2.0+ RRR target.
-        WR above 75% on D1 = likely curve-fitted (rejected).
-        Scoring is expectancy-first — no WR lock-in loop.
-        """
-        wr      = result.get("win_rate", 0)
-        rrr     = result.get("avg_rrr", 0)
-        trades  = result.get("trades", 0)
-        dd      = result.get("max_drawdown", 0)
-        pf      = result.get("profit_factor", 0)
-        overfit = result.get("overfitting", False)
-        train_wr = result.get("train_wr", wr)
+        wr      = result.get("wr",       0)
+        avg_win = result.get("avg_win",  0)
+        avg_loss= result.get("avg_loss", 1)
+        pf      = result.get("pf",       0)
+        dd      = result.get("dd",       1)
+        trades  = result.get("trades",   0)
 
-        # ── Gate 0: minimum sample ────────────────────────────────────────────
-        if trades < 15:
-            logger.debug(f"[{pair}] REJECT: trades={trades} < 15")
+        if trades < 8:
             return False
 
-        # ── Gate 1: Realistic WR band 55-75% ─────────────────────────────────
-        # Below 55% = noise. Above 75% on D1 = almost certainly over-fitted.
-        if wr < MIN_WR_FLOOR:
-            logger.debug(f"[{pair}] REJECT: wr={wr:.1%} < min {MIN_WR_FLOOR:.0%}")
-            return False
-        if wr > MAX_WR_CAP:
-            # Don't hard-reject — check if train WR is similarly high (genuine)
-            # If train WR is also >75%, probably a quirky asset, allow it
-            if train_wr <= MAX_WR_CAP + 0.05:
-                logger.debug(f"[{pair}] REJECT: wr={wr:.1%} > cap {MAX_WR_CAP:.0%} (likely curve-fit)")
-                return False
-            # else: train also very high → genuine asset characteristic, allow
-
-        # ── Gate 2: Hard RRR floor ────────────────────────────────────────────
-        if rrr < RRR_FLOOR:
-            logger.debug(f"[{pair}] REJECT: rrr={rrr:.2f} < floor {RRR_FLOOR}")
+        # WR realistic band: 55% – 78%
+        if wr < 0.55 or wr > 0.78:
             return False
 
-        # ── Gate 3: Drawdown < 10% ────────────────────────────────────────────
-        if dd > 0.10:
-            logger.debug(f"[{pair}] REJECT: dd={dd:.1%} > 10%")
-            return False
-
-        # ── Gate 4: Profit Factor > 1.3 ──────────────────────────────────────
+        # Profit Factor
         if pf > 0 and pf < 1.3:
-            logger.debug(f"[{pair}] REJECT: pf={pf:.2f} < 1.3")
             return False
 
-        # ── Gate 5: Overfit check ─────────────────────────────────────────────
-        if overfit:
-            self.overfit_strikes[pair] = self.overfit_strikes.get(pair, 0) + 1
-            strikes = self.overfit_strikes[pair]
-            logger.debug(f"[{pair}] REJECT: overfit (strike {strikes})")
-            if strikes > 0 and strikes % 30 == 0:
-                logger.info(f"[{pair}] OVERFIT RESET after {strikes} strikes")
-                self._overfit_reset(pair)
-            return False
-        else:
-            self.overfit_strikes[pair] = 0
-
-        # ── Gate 6: Positive expectancy ───────────────────────────────────────
-        expectancy = wr * rrr - (1 - wr)
-        if expectancy <= 0:
-            logger.debug(f"[{pair}] REJECT: E={expectancy:.4f} <= 0")
+        # Max drawdown 8%
+        if dd > 0.08:
             return False
 
-        # ── Gate 7: Beat current best score ──────────────────────────────────
-        # Score = expectancy + strong RRR bonus (rewards 2R+ over 1.5R)
-        score = expectancy + max(0.0, rrr - TARGET_RRR) * 0.15
-        cur_best = self.best_score.get(pair, 0)
-        if score <= cur_best:
-            logger.debug(f"[{pair}] REJECT: score={score:.4f} <= best {cur_best:.4f}")
+        # Positive expectancy
+        exp = wr * avg_win - (1 - wr) * avg_loss
+        if exp <= 0:
             return False
 
-        # ── Gate 8: Monte Carlo ───────────────────────────────────────────────
-        mc_pass = result.get("monte_carlo_pass_rate", 1.0)
-        if mc_pass < MONTE_MIN:
-            logger.debug(f"[{pair}] REJECT: mc={mc_pass:.2f} < {MONTE_MIN}")
+        # Must beat current best expectancy
+        best_e = self.best_expectancy.get(pair, -999)
+        if exp <= best_e:
+            return False
+
+        # RRR floor
+        rrr = result.get("avg_rrr", 0)
+        if rrr < 1.5:
             return False
 
         return True
 
     def accept(self, pair: str, params: dict, result: dict):
-        wr    = result.get("win_rate", 0)
-        rrr   = result.get("avg_rrr", 0)
-        expectancy = wr * rrr - (1 - wr)
-        score = expectancy + max(0.0, rrr - 1.5) * 0.05
+        wr      = result["wr"]
+        avg_win = result["avg_win"]
+        avg_loss= result["avg_loss"]
+        exp     = wr * avg_win - (1 - wr) * avg_loss
 
-        self.best_wr[pair]     = max(self.best_wr.get(pair, 0), wr)
-        self.best_rrr[pair]    = max(self.best_rrr.get(pair, 0), rrr)
-        self.best_score[pair]  = score
-        self.best_params[pair] = copy.deepcopy(params)
-        self.best_result[pair] = result
-        self.no_improve[pair]  = 0
-        self.current_params[pair] = copy.deepcopy(params)
+        self.best_wr[pair]         = max(self.best_wr.get(pair, 0), wr)
+        self.best_expectancy[pair] = exp
+        self.best_score[pair]      = exp + result["avg_rrr"] * 0.05
+        self.best_params[pair]     = copy.deepcopy(params)
+        self.current_params[pair]  = copy.deepcopy(params)
+        self.no_improve[pair]      = 0
 
-        # Update XAUUSD global best
-        if pair in ("XAUUSD", "GC=F"):
-            self.xauusd_best_wr = max(self.xauusd_best_wr, wr)
-
-        # Update global score
-        self.global_best_score = max(self.global_best_score, score)
-
-        # Update skills
-        self._update_skills(pair, params, result)
-
-        # Update expectancy engine
-        try:
-            from analytics.expectancy_engine import get_engine as _get_exp
-            _get_exp().update_from_result(pair, result)
-        except Exception:
-            pass
-
-        # Update standalone evolution engine state
-        try:
-            from evolution.evolution_engine import get_engine as _get_evo
-            _get_evo().accept(pair, params, result)
-        except Exception:
-            pass
-
-        # Update param momentum
-        last_p = self.last_changed.get(pair)
-        if last_p:
-            old_score = self.best_score.get(pair, 0)
-            delta = score - old_score
-            self.param_momentum.setdefault(pair, {}).setdefault(
-                last_p, deque(maxlen=5)).append(delta)
-
-    # ── Smart mutation ─────────────────────────────────────────────────────────
-
-    def smart_mutate(self, pair: str) -> dict:
-        """
-        Momentum-based mutation:
-        1. If last 3 changes to a param improved → continue same direction
-        2. If flat/declining → try highest-priority untried param
-        3. Stuck 50+ → random restart (handled separately)
-        """
-        base = self.current_params.get(pair) or self._default_params(pair)
-        ni   = self.no_improve.get(pair, 0)
-
-        # After random restart, use fully random params
-        if ni == 0 and self.last_changed.get(pair) == "__restart__":
-            self.last_changed[pair] = ""
-            return base
-
-        # Pick param to mutate
-        param = self._pick_param_to_mutate(pair, ni)
-        self.last_changed[pair] = param
-
-        new_params = copy.deepcopy(base)
-        old_val    = new_params.get(param)
-        new_val    = self._pick_new_value(param, old_val, pair)
-        new_params[param] = new_val
-        new_params["version"] = new_params.get("version", 1) + 1
-        new_params["notes"] = f"Mutated {param}: {old_val} → {new_val}"
-
-        return new_params
-
-    def _pick_param_to_mutate(self, pair: str, no_improve_count: int) -> str:
-        # Prioritise by: momentum direction > priority list > random
-        momentum = self.param_momentum.get(pair, {})
-
-        # If last param had positive momentum, keep mutating it
-        last_p = self.last_changed.get(pair, "")
-        if last_p and last_p in momentum:
-            hist = list(momentum[last_p])
-            if len(hist) >= 2 and all(d > 0 for d in hist[-2:]):
-                return last_p  # keep momentum
-
-        # Otherwise pick from priority list with some randomness
-        candidates = PARAM_PRIORITIES[:]
-
-        # Boost params flagged as likely blockers for XAUUSD
-        if pair in ("XAUUSD", "GC=F"):
-            xau_wr = self.best_wr.get(pair, 0)
-            if xau_wr >= 0.65:
-                # boost high-value params for final push to 80%
-                boost = ["tp_rrr", "min_confluence",
-                         "use_ema_stack", "sl_atr_mult"]
-                candidates = boost + [p for p in candidates if p not in boost]
-
-        # Weighted random selection — earlier in list = higher probability
-        weights = [1.0 / (i + 1) for i in range(len(candidates))]
-        total   = sum(weights)
-        r = random.random() * total
-        acc = 0
-        for param, w in zip(candidates, weights):
-            acc += w
-            if r <= acc:
-                return param
-        return random.choice(candidates)
-
-    def _pick_new_value(self, param: str, old_val, pair: str):
-        choices = PARAM_RANGES.get(param, [])
-        if not choices:
-            return old_val
-
-        # Filter out current value
-        options = [v for v in choices if v != old_val]
-        if not options:
-            return old_val
-
-        # Check momentum direction for numeric params
-        if isinstance(old_val, (int, float)) and isinstance(choices[0], (int, float)):
-            mom = self.param_momentum.get(pair, {}).get(param, deque())
-            hist = list(mom)
-            if len(hist) >= 2:
-                avg_delta = sum(hist[-3:]) / len(hist[-3:])
-                # If positive trend, try higher values; negative → lower
-                sorted_opts = sorted(options)
-                if avg_delta > 0:
-                    # Prefer values above current
-                    above = [v for v in sorted_opts if v > old_val]
-                    if above:
-                        return above[0]
-                elif avg_delta < 0:
-                    below = [v for v in sorted_opts if v < old_val]
-                    if below:
-                        return below[-1]
-
-        return random.choice(options)
-
-    def _default_params(self, pair: str) -> dict:
-        """Return sensible starting params, preferring skills library."""
-        # Try skills first
-        sk = self.skills.get("per_pair", {}).get(pair, {})
-        if sk and isinstance(sk, dict) and "params" in sk:
-            return copy.deepcopy(sk["params"])
-
-        # REALISTIC default: wide SL (1.5×ATR on D1) → genuine 60-65% WR
-        return {
-            "ema_fast": 21, "ema_slow": 89, "ema_long": 200,
-            "ema_weekly": 26, "atr_period": 14,
-            "sl_atr_mult": 1.5,    # WIDE: 1.5×ATR stops intraday noise from triggering SL
-            "tp_rrr": 4.0,         # 4R target = realistic with wide SL
-            "trail_atr_mult": 2.5, # 2.5×ATR trail = room to breathe
-            "partial_pct_1r": 0.25,
-            "min_adx": 20.0,
-            "rsi_long_min": 30.0, "rsi_long_max": 68.0,
-            "rsi_short_min": 32.0, "rsi_short_max": 65.0,
-            "pullback_atr_mult": 2.0, "min_vol_ratio": 0.7,
-            "use_weekly_filter": True, "use_ema_stack": False,
-            "use_pattern": True, "use_pullback_zone": False,
-            "use_adx_filter": True, "use_volume_filter": False,
-            "use_expansion": True, "use_ict_filter": False,
-            "ict_min_score": 40,
-            "min_hold_bars": 2, "min_confluence": 3,
-            "version": 1, "strategy_name": "RealisticTrend",
-            "notes": "Realistic D1 default: wide SL, high RRR",
-        }
-
-    def _random_restart(self, pair: str):
-        """Jump to random params when stuck for STUCK_RESTART iterations."""
-        logger.info(f"RANDOM RESTART [{pair}] after {self.no_improve[pair]} no-improve iters")
-        base = copy.deepcopy(self.best_params.get(pair) or self._default_params(pair))
-        for _ in range(random.randint(4, 8)):
-            param = random.choice(PARAM_PRIORITIES[:12])
+    # ── Mutation ──────────────────────────────────────────────────────────────
+    def mutate(self, pair: str) -> dict:
+        base = copy.deepcopy(
+            self.current_params.get(pair) or self.best_params.get(pair) or
+            self.default_params())
+        # Mutate 1-3 parameters
+        n_muts = random.choice([1, 1, 2, 3])
+        for _ in range(n_muts):
+            param   = random.choice(PARAM_PRIORITIES[:10])
             choices = PARAM_RANGES.get(param, [])
             if choices:
                 base[param] = random.choice(choices)
         base["version"] = base.get("version", 1) + 1
-        base["notes"] = "Random restart"
+        return base
+
+    def default_params(self) -> dict:
+        return {
+            "ema_fast": 21, "ema_slow": 89, "rsi_period": 14,
+            "rsi_long_max": 65, "rsi_short_min": 35, "atr_period": 14,
+            "sl_atr_mult": 0.5, "tp_rrr": 3.0, "trail_atr_mult": 1.5,
+            "partial1_r": 1.5, "partial2_r": 2.5,
+            "min_adx": 25, "use_adx": True, "use_ema_stack": True,
+            "min_confluence": 3, "version": 1,
+        }
+
+    def _random_restart(self, pair: str):
+        log.info(f"[{pair}] Random restart after 50 no-improve iters")
+        base = self.default_params()
+        for _ in range(random.randint(4, 8)):
+            p = random.choice(PARAM_PRIORITIES[:10])
+            c = PARAM_RANGES.get(p, [])
+            if c:
+                base[p] = random.choice(c)
         self.current_params[pair] = base
         self.no_improve[pair] = 0
-        self.last_changed[pair] = "__restart__"
-        send_telegram(f"🔄 [{pair}] Random restart after plateau. Exploring new region.")
+        send_telegram(f"🔄 [{pair}] Random restart — exploring new region.")
 
-    def _new_strategy_type(self, pair: str):
-        """Try a completely different parameter configuration after 100 stuck iters."""
-        logger.info(f"NEW STRATEGY TYPE [{pair}] after {STUCK_STRATEGY} stuck iters")
-        # Realistic strategy templates: wide SL → honest WR, high TP → high RRR
-        strategies = [
-            # Trend runner: 2×ATR SL, 6R TP, small partial
-            {"tp_rrr": 6.0, "trail_atr_mult": 3.0, "partial_pct_1r": 0.15,
-             "sl_atr_mult": 2.0, "min_confluence": 3,
-             "use_ema_stack": True, "use_adx_filter": True, "use_expansion": True},
-            # Swing breakout: 2×ATR SL, 5R TP, partial at 1R
-            {"tp_rrr": 5.0, "trail_atr_mult": 2.5, "partial_pct_1r": 0.25,
-             "sl_atr_mult": 2.0, "min_confluence": 3,
-             "use_ema_stack": True, "use_weekly_filter": True, "use_pattern": True},
-            # Patient swing: 2.5×ATR SL, 4R TP, 25% partial
-            {"tp_rrr": 4.0, "trail_atr_mult": 2.0, "partial_pct_1r": 0.25,
-             "sl_atr_mult": 2.5, "min_confluence": 4,
-             "use_ema_stack": True, "use_weekly_filter": True, "use_expansion": True},
-            # Pure runner: 2.5×ATR SL, 8R TP, no partial
-            {"tp_rrr": 8.0, "trail_atr_mult": 4.0, "partial_pct_1r": 0.0,
-             "sl_atr_mult": 2.5, "min_confluence": 3,
-             "use_adx_filter": True, "use_weekly_filter": True},
-            # Moderate: 1.5×ATR SL, 3R TP, patient entry
-            {"tp_rrr": 3.0, "trail_atr_mult": 2.0, "partial_pct_1r": 0.25,
-             "sl_atr_mult": 1.5, "min_confluence": 4,
-             "use_ema_stack": True, "use_pattern": True},
+    def _new_strategy(self, pair: str):
+        log.info(f"[{pair}] New strategy type after 100 no-improve iters")
+        templates = [
+            {"tp_rrr": 5.0, "sl_atr_mult": 0.4, "trail_atr_mult": 2.0,
+             "partial1_r": 2.0, "partial2_r": 3.0, "min_confluence": 3},
+            {"tp_rrr": 3.0, "sl_atr_mult": 0.6, "trail_atr_mult": 1.5,
+             "partial1_r": 1.5, "partial2_r": 2.5, "min_confluence": 4},
+            {"tp_rrr": 4.0, "sl_atr_mult": 0.5, "trail_atr_mult": 2.0,
+             "use_ema_stack": False, "use_adx": True, "min_confluence": 3},
         ]
-        template = random.choice(strategies)
-        new = self._default_params(pair)
-        new.update(template)
-        new["version"] = new.get("version", 1) + 1
-        new["notes"] = "New strategy type"
+        new = self.default_params()
+        new.update(random.choice(templates))
         self.current_params[pair] = new
         self.no_improve[pair] = 0
-        send_telegram(f"♻️ [{pair}] Switching strategy type after 100-iter plateau.")
-
-    def _overfit_reset(self, pair: str):
-        """Force conservative, low-overfit params when a pair is chronically overfitting.
-
-        Chronic overfitting means the strategy generates too many signals on training
-        data but fails on unseen test data. The fix: fewer confluences (higher min_confluence),
-        wider SL (more room), fewer optional filters (less curve-fitting to history).
-        """
-        conservative = self._default_params(pair)
-        # High confluence reduces signal count → fewer overfitting opportunities
-        conservative["min_confluence"] = 4
-        conservative["min_adx"] = 25.0
-        # Moderate TP/trail — not too greedy in train window
-        conservative["tp_rrr"] = 3.0
-        conservative["trail_atr_mult"] = 2.0
-        conservative["partial_pct_1r"] = 0.25
-        conservative["sl_atr_mult"] = 1.0
-        # Disable noisy optional filters
-        conservative["use_ema_stack"] = True
-        conservative["use_weekly_filter"] = True
-        conservative["use_pattern"] = False
-        conservative["use_expansion"] = False
-        conservative["use_adx_filter"] = True
-        conservative["version"] = conservative.get("version", 1) + 1
-        conservative["notes"] = "Overfit reset — conservative params"
-        self.current_params[pair] = conservative
-        self.no_improve[pair] = 0
-        self.overfit_strikes[pair] = 0
-        send_telegram(
-            f"🛡️ [{pair}] Overfit reset: conservative params applied.\n"
-            f"High confluence + wide SL + no curve-fitting filters."
-        )
-
-    # ── Backtest ───────────────────────────────────────────────────────────────
-
-    def _run_backtest(self, pair: str, params: dict) -> Optional[dict]:
-        try:
-            d1, w1 = self._get_data(pair)
-            if d1 is None or len(d1) < 300:
-                logger.warning(f"Insufficient data for {pair}")
-                return None
-
-            TrendParams = self._tp_cls
-            WFBacktester = self._wf_cls
-
-            tp = TrendParams.from_dict(params)
-            bt = WFBacktester(tp)
-            wf = bt.run(d1, w1, pair=pair, n_folds=5)
-
-            wr  = wf.test_win_rate_realistic if wf.test_win_rate_realistic > 0 else wf.test_win_rate
-            # Use non-realistic avg_rrr: measures abs(pnl/risk) across all trades.
-            # test_avg_rrr_realistic measures only winning partial-close trades — biased low.
-            rrr = wf.test_avg_rrr if wf.test_avg_rrr > 0 else wf.test_avg_rrr_realistic
-
-            # Monte Carlo on test trades
-            mc_pass_rate = self._monte_carlo(wf)
-
-            # Use composite_score() as primary score — already handles WR, trades, DD, PF
-            comp = wf.composite_score()
-
-            return {
-                "win_rate":    wr,
-                "avg_rrr":     rrr,
-                "score":       comp if comp > 0 else wr * min(rrr, 5.0),
-                "trades":      wf.test_trades,
-                "max_dd":      wf.test_max_dd_pct,
-                "profit_factor": wf.test_profit_factor,
-                "sharpe":      wf.test_sharpe,
-                "return_pct":  wf.test_return_pct,
-                "train_wr":    wf.train_win_rate,
-                "overfitting": wf.overfitting_flag,
-                "monte_carlo_pass_rate": mc_pass_rate,
-                "pair":        pair,
-                "timestamp":   datetime.now(timezone.utc).isoformat(),
-            }
-        except Exception as e:
-            logger.error(f"Backtest failed [{pair}]: {e}")
-            return None
-
-    def _monte_carlo(self, wf_result) -> float:
-        """Shuffle test trades 1000x, check WR survives. Returns pass rate."""
-        try:
-            test_trades = [t for t in wf_result.trades if t.split == "test"]
-            if len(test_trades) < 15:
-                return 1.0
-            outcomes = [1 if t.outcome == "win" else 0 for t in test_trades]
-            n = len(outcomes)
-            passes = 0
-            base_wr = sum(outcomes) / n
-            for _ in range(MONTE_N):
-                shuffled = random.choices(outcomes, k=n)
-                if sum(shuffled) / n >= base_wr * 0.85:
-                    passes += 1
-            return passes / MONTE_N
-        except Exception:
-            return 1.0
-
-    # ── Data management ────────────────────────────────────────────────────────
-
-    def _get_data(self, pair: str):
-        """Return (d1_df, w1_df) from cache or download."""
-        now = time.time()
-        cache_key = pair
-
-        # Check in-memory cache (24h)
-        if cache_key in self.data_cache:
-            d1, w1, ts = self.data_cache[cache_key]
-            if now - ts < 86400:
-                return d1, w1
-
-        # Check disk cache
-        disk_file = os.path.join(DATA_DIR, f"{pair.replace('=','_').replace('-','_')}_d1.pkl")
-        if os.path.exists(disk_file):
-            age = now - os.path.getmtime(disk_file)
-            if age < 86400:
-                try:
-                    import pickle
-                    with open(disk_file, "rb") as f:
-                        d1, w1 = pickle.load(f)
-                    self.data_cache[cache_key] = (d1, w1, now)
-                    return d1, w1
-                except Exception:
-                    pass
-
-        return self._refresh_single_pair(pair)
-
-    def _refresh_single_pair(self, pair: str):
-        try:
-            import yfinance as yf
-            ticker = PAIR_TICKERS.get(pair, pair)
-            period = PAIR_PERIODS.get(pair, "5y")
-
-            raw_d1 = yf.download(ticker, period=period, interval="1d",
-                                  progress=False, auto_adjust=True)
-            raw_w1 = yf.download(ticker, period=period, interval="1wk",
-                                  progress=False, auto_adjust=True)
-
-            if raw_d1 is None or len(raw_d1) < 100:
-                logger.warning(f"No D1 data for {pair}")
-                return None, None
-
-            for raw in (raw_d1, raw_w1):
-                if hasattr(raw.columns, "levels"):
-                    raw.columns = [c[0].lower() for c in raw.columns]
-                else:
-                    raw.columns = [c.lower() for c in raw.columns]
-                raw.index.name = "time"
-                if raw.index.tzinfo is not None:
-                    raw.index = raw.index.tz_localize(None)
-
-            d1 = raw_d1[["open", "high", "low", "close", "volume"]].dropna()
-            w1 = raw_w1[["open", "high", "low", "close", "volume"]].dropna() \
-                 if not raw_w1.empty else None
-
-            # Save to disk
-            import pickle
-            disk_file = os.path.join(DATA_DIR, f"{pair.replace('=','_').replace('-','_')}_d1.pkl")
-            with open(disk_file, "wb") as f:
-                pickle.dump((d1, w1), f)
-
-            self.data_cache[pair] = (d1, w1, time.time())
-            logger.info(f"Data: {pair} {len(d1)} bars ({d1.index[0].date()} → {d1.index[-1].date()})")
-            return d1, w1
-
-        except Exception as e:
-            logger.error(f"Data download failed [{pair}]: {e}")
-            return None, None
-
-    def _refresh_data(self, force: bool = False):
-        """Download/refresh all pairs. Called at startup and every 24h."""
-        logger.info("Refreshing all pair data...")
-        for pair in PAIRS:
-            if force:
-                # Clear cache to force re-download
-                self.data_cache.pop(pair, None)
-                disk = os.path.join(DATA_DIR, f"{pair.replace('=','_').replace('-','_')}_d1.pkl")
-                if os.path.exists(disk):
-                    try:
-                        age = time.time() - os.path.getmtime(disk)
-                        if age > 86400:
-                            os.remove(disk)
-                    except Exception:
-                        pass
-            self._get_data(pair)
-        self.data_cache_time = time.time()
+        send_telegram(f"♻️ [{pair}] New strategy type — 100-iter plateau.")
 
     # ── State persistence ──────────────────────────────────────────────────────
-
     def save_state(self):
-        state = {
-            "iteration":       self.iteration,
-            "xauusd_best_wr":  self.xauusd_best_wr,
-            "global_best_score": self.global_best_score,
-            "best_wr":         self.best_wr,
-            "best_rrr":        self.best_rrr,
-            "best_score":      self.best_score,
-            "best_params":     self.best_params,
-            "no_improve":      self.no_improve,
-            "overfit_strikes": self.overfit_strikes,
-            "current_params":  self.current_params,
-            "last_saved":      datetime.now(timezone.utc).isoformat(),
-        }
         try:
-            with open(STATE_FILE, "w") as f:
-                json.dump(state, f, indent=2)
+            json.dump({
+                "iteration":       self.iteration,
+                "best_wr":         self.best_wr,
+                "best_expectancy": self.best_expectancy,
+                "best_score":      self.best_score,
+                "best_params":     self.best_params,
+                "no_improve":      self.no_improve,
+                "current_params":  self.current_params,
+                "saved":           datetime.now(timezone.utc).isoformat(),
+            }, open(STATE_FILE, "w"), indent=2)
         except Exception as e:
-            logger.error(f"State save failed: {e}")
-
-        # Also save to legacy path so watchdog/dashboard still works
-        legacy = os.path.join(STATE_DIR, "auto_loop_state.json")
-        try:
-            legacy_state = {
-                "iteration":            self.iteration,
-                "best_wr":              self.global_best_score,
-                "best_xauusd_wr":       self.xauusd_best_wr,
-                "best_xauusd_wr_real":  self.xauusd_best_wr,
-                "no_improvement_count": max(self.no_improve.values()) if self.no_improve else 0,
-                "last_saved":           datetime.now(timezone.utc).isoformat(),
-                "best_params":          self.best_params.get("XAUUSD", {}),
-                "pairs":                PAIRS,
-            }
-            with open(legacy, "w") as f:
-                json.dump(legacy_state, f, indent=2)
-        except Exception:
-            pass
-
-        # Supabase backup every 10 iterations
-        if self.iteration % 10 == 0:
-            self._save_supabase()
+            log.error(f"State save failed: {e}")
 
     def load_state(self):
-        # Try new state file first
-        for path in [STATE_FILE, os.path.join(STATE_DIR, "auto_loop_state.json")]:
-            if not os.path.exists(path):
-                continue
-            try:
-                with open(path) as f:
-                    s = json.load(f)
-
-                self.iteration        = s.get("iteration", 0)
-                self.xauusd_best_wr   = s.get("xauusd_best_wr",
-                                         s.get("best_xauusd_wr_real",
-                                         s.get("best_xauusd_wr", 0)))
-                self.global_best_score = s.get("global_best_score", 0)
-
-                # Guard: legacy files stored these as scalars not dicts
-                _wr = s.get("best_wr", {})
-                self.best_wr = _wr if isinstance(_wr, dict) else {}
-
-                _rrr = s.get("best_rrr", {})
-                self.best_rrr = _rrr if isinstance(_rrr, dict) else {}
-
-                _sc = s.get("best_score", {})
-                self.best_score = _sc if isinstance(_sc, dict) else {}
-
-                _bp = s.get("best_params", {})
-                if isinstance(_bp, dict) and "ema_fast" in _bp:
-                    # Flat param dict from old engine — treat as XAUUSD params
-                    self.best_params = {"XAUUSD": _bp}
-                elif isinstance(_bp, dict):
-                    # Proper pair-keyed dict — but filter out any flat entries
-                    self.best_params = {k: v for k, v in _bp.items()
-                                        if isinstance(v, dict) and "ema_fast" in v}
-                else:
-                    self.best_params = {}
-
-                _ni = s.get("no_improve", s.get("no_improvement_per_pair", {}))
-                self.no_improve = _ni if isinstance(_ni, dict) else {}
-
-                _os = s.get("overfit_strikes", {})
-                self.overfit_strikes = _os if isinstance(_os, dict) else {}
-
-                _cp = s.get("current_params", {})
-                if isinstance(_cp, dict) and "ema_fast" in _cp:
-                    # Flat param dict — use it as starting point for all pairs
-                    self.current_params = {p: copy.deepcopy(_cp) for p in PAIRS}
-                elif isinstance(_cp, dict):
-                    self.current_params = {k: v for k, v in _cp.items()
-                                           if isinstance(v, dict) and "ema_fast" in v}
-                else:
-                    self.current_params = {}
-
-                # Populate current_params from best_params for pairs not present
-                for p in PAIRS:
-                    if p not in self.current_params and p in self.best_params:
-                        self.current_params[p] = copy.deepcopy(self.best_params[p])
-
-                # Restore XAUUSD WR floor from saved xauusd_best_wr if not in best_wr
-                # best_score is NOT restored — first qualifying result sets the baseline.
-                # This prevents the artificial floor from blocking genuine improvements.
-                if self.xauusd_best_wr > 0:
-                    for xau in ("XAUUSD", "GC=F"):
-                        if xau not in self.best_wr:
-                            self.best_wr[xau] = self.xauusd_best_wr
-
-                logger.info(
-                    f"State loaded: iter={self.iteration} | "
-                    f"XAUUSD WR={self.xauusd_best_wr:.1%} | "
-                    f"path={os.path.basename(path)}"
-                )
-                break
-            except Exception as e:
-                logger.warning(f"State load failed ({path}): {e}")
-
-        # Load skills
-        if os.path.exists(SKILLS_FILE):
-            try:
-                with open(SKILLS_FILE) as f:
-                    self.skills = json.load(f)
-                logger.info(f"Skills loaded: {self.skills.get('total_skills_learned', 0)} total")
-            except Exception:
-                self.skills = {}
-
-        # Load monthly db
-        if os.path.exists(MONTHLY_FILE):
-            try:
-                with open(MONTHLY_FILE) as f:
-                    self.monthly_db = json.load(f)
-            except Exception:
-                self.monthly_db = {}
-
-    def _save_supabase(self):
         try:
-            from database.supabase_client import SupabaseClient
-            db = SupabaseClient()
-            db.set_state("iteration", str(self.iteration))
-            db.set_state("xauusd_best_wr", f"{self.xauusd_best_wr:.6f}")
-            db.set_state("global_best_score", f"{self.global_best_score:.6f}")
-            db.set_state("last_update", datetime.now(timezone.utc).isoformat())
+            if STATE_FILE.exists():
+                s = json.load(open(STATE_FILE))
+                self.iteration       = s.get("iteration",       0)
+                self.best_wr         = s.get("best_wr",         {})
+                self.best_expectancy = s.get("best_expectancy", {})
+                self.best_score      = s.get("best_score",      {})
+                self.best_params     = s.get("best_params",     {})
+                self.no_improve      = s.get("no_improve",      {})
+                self.current_params  = s.get("current_params",  {})
+                log.info(f"State loaded: iter={self.iteration} | {len(self.best_params)} pairs with params")
         except Exception as e:
-            logger.debug(f"Supabase backup failed: {e}")
+            log.warning(f"State load error: {e}")
 
-    # ── Skills ─────────────────────────────────────────────────────────────────
-
-    def _update_skills(self, pair: str, params: dict, result: dict):
-        per_pair = self.skills.setdefault("per_pair", {})
-        existing = per_pair.get(pair, {})
-        new_score = result.get("score", 0)
-
-        if new_score > existing.get("score", 0):
-            per_pair[pair] = {
-                "params": copy.deepcopy(params),
-                "win_rate": result.get("win_rate", 0),
-                "avg_rrr":  result.get("avg_rrr", 0),
-                "score":    new_score,
-                "updated":  datetime.now(timezone.utc).isoformat(),
-            }
-            self.skills["total_skills_learned"] = \
-                self.skills.get("total_skills_learned", 0) + 1
-            self.skills["last_updated"] = datetime.now(timezone.utc).isoformat()
-
-            try:
-                with open(SKILLS_FILE, "w") as f:
-                    json.dump(self.skills, f, indent=2)
-            except Exception:
-                pass
-
-    # ── Reporting ──────────────────────────────────────────────────────────────
-
-    def _send_telegram_report(self):
-        now = datetime.now(timezone.utc)
-        elapsed_h = (now.timestamp() - (self._start_time or now.timestamp())) / 3600
-
-        xau_wr = self.xauusd_best_wr
-        gap = max(0, TARGET_WR - xau_wr)
-
-        top3 = sorted(
-            [(p, self.best_wr.get(p, 0)) for p in PAIRS if self.best_wr.get(p, 0) > 0],
-            key=lambda x: -x[1]
-        )[:3]
-        top3_str = " | ".join(f"{p}:{wr:.0%}" for p, wr in top3) or "evolving..."
-
-        stuck = sum(1 for ni in self.no_improve.values() if ni >= 20)
-
-        msg = (
-            f"=== AUTOTRADER {now.strftime('%H:%M UTC')} ===\n"
-            f"Iter: {self.iteration} | Uptime: {elapsed_h:.1f}h\n"
-            f"XAUUSD: {xau_wr:.1%} WR\n"
-            f"Top3: {top3_str}\n"
-            f"Stuck pairs: {stuck}\n"
-            f"To 80%: {gap:.1%} gap\n"
-            f"Skills: {self.skills.get('total_skills_learned', 0)}\n"
-            f"========================"
-        )
-        send_telegram(msg)
-
-    def _send_full_report(self):
-        rows = []
-        for pair in PAIRS:
-            wr  = self.best_wr.get(pair, 0)
-            rrr = self.best_rrr.get(pair, 0)
-            sc  = self.best_score.get(pair, 0)
-            ni  = self.no_improve.get(pair, 0)
-            rows.append(f"{pair:10s} | {wr:.0%} | {rrr:.2f} | {sc:.3f} | {ni} iter stuck")
-
-        table = "\n".join(rows)
-        logger.info(f"\n{'='*60}\nPAIR RANKINGS (iter {self.iteration}):\n{table}\n{'='*60}")
-        send_telegram(
-            f"PAIR RANKINGS iter {self.iteration}\n"
-            f"XAUUSD WR={self.xauusd_best_wr:.1%}\n"
-            + "\n".join(rows[:10])
-        )
-
-        # Send email
-        self._send_evolution_email()
-
-    def _send_evolution_email(self):
-        subject = f"AutoTrader Evolution {datetime.now().strftime('%Y-%m-%d')}"
-        rows_html = ""
-        for pair in PAIRS:
-            wr  = self.best_wr.get(pair, 0)
-            rrr = self.best_rrr.get(pair, 0)
-            sc  = self.best_score.get(pair, 0)
-            ni  = self.no_improve.get(pair, 0)
-            color = "#00ff88" if wr >= 0.65 else ("#ffaa00" if wr >= 0.50 else "#ff4444")
-            rows_html += (
-                f"<tr><td>{pair}</td>"
-                f"<td style='color:{color}'>{wr:.1%}</td>"
-                f"<td>{rrr:.2f}</td>"
-                f"<td>{sc:.3f}</td>"
-                f"<td>{'▲' if ni == 0 else ni}</td></tr>"
-            )
-
-        best_p = self.best_params.get("XAUUSD", {})
-        monthly_html = self._monthly_table_html()
-
-        html = f"""
-        <html><body style="background:#1a1a2e;color:#eee;font-family:monospace">
-        <h2 style="color:#ffd700">AutoTrader Evolution — {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}</h2>
-        <table style="border-collapse:collapse;width:100%">
-        <tr style="background:#2a2a4e;color:#aaa">
-          <th>Pair</th><th>WR%</th><th>RRR</th><th>Score</th><th>Stuck</th>
-        </tr>{rows_html}
-        </table>
-        <h3 style="color:#ffd700">XAUUSD Best Params</h3>
-        <pre style="background:#0d1117;padding:10px;color:#7ee787">{json.dumps(best_p, indent=2)}</pre>
-        <p style="color:#888">Iteration: {self.iteration} | Skills: {self.skills.get('total_skills_learned',0)}</p>
-        {monthly_html}
-        </body></html>
-        """
-        send_email(subject, html)
-
-    def _monthly_table_html(self) -> str:
-        if not self.monthly_db:
-            return "<p style='color:#888'>Monthly backtest not yet run.</p>"
-        rows = []
-        for key in sorted(self.monthly_db.keys())[-24:]:   # last 24 months
-            d = self.monthly_db[key].get("XAUUSD", {})
-            rows.append(
-                f"<tr><td>{key}</td>"
-                f"<td>{d.get('trades',0)}</td>"
-                f"<td>{d.get('wr',0):.0%}</td>"
-                f"<td>{d.get('rrr',0):.2f}</td>"
-                f"<td>{d.get('pnl',0):+.1f}%</td>"
-                f"<td>{d.get('max_dd',0):.1f}%</td></tr>"
-            )
-        if not rows:
-            return ""
-        return (
-            "<h3 style='color:#ffd700'>XAUUSD Monthly History</h3>"
-            "<table style='border-collapse:collapse;width:100%'>"
-            "<tr style='background:#2a2a4e;color:#aaa'>"
-            "<th>Month</th><th>Trades</th><th>WR</th><th>RRR</th><th>PnL%</th><th>MaxDD%</th>"
-            "</tr>" + "".join(rows) + "</table>"
-        )
-
-    # ── Monthly backtest ───────────────────────────────────────────────────────
-
-    def run_monthly_backtest(self):
-        """Build complete monthly P&L history 2022-today for all pairs. Run once."""
-        import pandas as pd
-        logger.info("Running monthly backtest 2022-today for all pairs...")
-        send_telegram("Starting monthly backtest history build 2022→today...")
-
-        start_year = 2022
-        now = datetime.now()
-
-        for pair in PAIRS:
-            d1, _ = self._get_data(pair)
-            if d1 is None or len(d1) < 100:
-                continue
-
-            best_p = self.best_params.get(pair) or self._default_params(pair)
-
-            try:
-                TrendParams = self._tp_cls
-                WFBacktester = self._wf_cls
-                tp  = TrendParams.from_dict(best_p)
-                bt  = WFBacktester(tp)
-
-                for year in range(start_year, now.year + 1):
-                    months = range(1, 13) if year < now.year else range(1, now.month + 1)
-                    for month in months:
-                        key = f"{year}-{month:02d}"
-                        if pair in self.monthly_db.get(key, {}):
-                            continue  # already computed
-
-                        # Slice data for this month
-                        mask = (d1.index.year == year) & (d1.index.month == month)
-                        month_df = d1[mask]
-                        if len(month_df) < 10:
-                            continue
-
-                        # Include 200 bars of context before this month
-                        month_start_pos = d1.index.get_loc(month_df.index[0])
-                        context_start   = max(0, month_start_pos - 200)
-                        context_df = d1.iloc[context_start:]
-
-                        try:
-                            wf = bt.run(context_df, None, pair=pair,
-                                        train_pct=context_start / len(context_df),
-                                        n_folds=1)
-                            if key not in self.monthly_db:
-                                self.monthly_db[key] = {}
-                            self.monthly_db[key][pair] = {
-                                "trades":  wf.test_trades,
-                                "wr":      round(wf.test_win_rate_realistic, 4),
-                                "rrr":     round(wf.test_avg_rrr_realistic, 4),
-                                "pnl":     round(wf.test_return_pct, 2),
-                                "max_dd":  round(wf.test_max_dd_pct, 2),
-                            }
-                        except Exception:
-                            pass
-
-            except Exception as e:
-                logger.warning(f"Monthly backtest failed [{pair}]: {e}")
-
+    # ── Telegram report ────────────────────────────────────────────────────────
+    def send_telegram_report(self):
         try:
-            with open(MONTHLY_FILE, "w") as f:
-                json.dump(self.monthly_db, f, indent=2)
-            logger.info(f"Monthly backtest saved: {MONTHLY_FILE}")
-            send_telegram(f"Monthly backtest complete. {len(self.monthly_db)} months stored.")
+            ram = get_ram_pct()
+            mt5_status = "Connected" if ensure_mt5() else "Offline"
+            lines = [f"=== AutoTrader iter {self.iteration:,} ==="]
+            top = sorted(self.best_expectancy.items(), key=lambda x: -x[1])[:6]
+            for pair, exp in top:
+                wr = self.best_wr.get(pair, 0)
+                lines.append(f"{pair}: WR={wr:.1%} E={exp:.3f}")
+            if not top:
+                lines.append("Evolving... No accepted pairs yet.")
+            lines.append(f"RAM: {ram:.0f}%")
+            lines.append(f"MT5: {mt5_status}")
+            lines.append("=" * 24)
+            send_telegram("\n".join(lines))
         except Exception as e:
-            logger.error(f"Monthly save failed: {e}")
+            log.debug(f"Telegram report error: {e}")
 
-    # ── FTMO check ─────────────────────────────────────────────────────────────
-
-    def ftmo_check(self) -> dict:
-        """Simulate FTMO challenge rules against current best XAUUSD strategy."""
-        r = self.best_result.get("XAUUSD", {})
-        if not r:
-            return {"pass": False, "reason": "no XAUUSD result"}
-
-        max_dd = r.get("max_dd", 100)
-        pnl    = r.get("return_pct", 0)
-        wr     = r.get("win_rate", 0)
-
-        dd_ok     = max_dd <= 10.0     # FTMO: max 10% DD
-        profit_ok = pnl >= 10.0        # FTMO: 10% profit target
-        wr_ok     = wr >= 0.50         # sanity
-
-        passed = dd_ok and profit_ok and wr_ok
-        result = {
-            "pass":      passed,
-            "max_dd":    max_dd,
-            "pnl":       pnl,
-            "wr":        wr,
-            "dd_ok":     dd_ok,
-            "profit_ok": profit_ok,
-        }
-        status = "PASS" if passed else "FAIL"
-        logger.info(f"FTMO Check: {status} | DD={max_dd:.1f}% | PnL={pnl:.1f}% | WR={wr:.1%}")
-        if passed:
-            send_telegram(f"✅ FTMO CHALLENGE PASS SIMULATION\n"
-                         f"MaxDD={max_dd:.1f}% | PnL={pnl:.1f}% | WR={wr:.1%}")
-        return result
-
-    # ── Heal ───────────────────────────────────────────────────────────────────
-
-    def heal(self, error: Exception):
-        err_str = str(error).lower()
-        tb      = traceback.format_exc()
-        logger.error(f"ERROR: {error}\n{tb[:500]}")
-
-        # Known fixes
-        if "no data" in err_str or "empty" in err_str or "nan" in err_str:
-            logger.info("Heal: clearing data cache and redownloading")
-            self.data_cache.clear()
-            for f in os.listdir(DATA_DIR):
-                try: os.remove(os.path.join(DATA_DIR, f))
-                except Exception: pass
-            time.sleep(5)
-
-        elif "json" in err_str or "decode" in err_str:
-            logger.info("Heal: corrupt JSON — resetting state")
-            try:
-                os.remove(STATE_FILE)
-            except Exception: pass
-
-        elif "memory" in err_str:
-            logger.info("Heal: memory error — trimming data cache")
-            self.data_cache.clear()
-            time.sleep(10)
-
-        elif "connection" in err_str or "timeout" in err_str:
-            logger.info("Heal: network error — waiting 60s")
-            time.sleep(60)
-
-        else:
-            time.sleep(5)
-
-        send_telegram(f"🔧 Healed: {str(error)[:100]}")
-
-    # ── Scheduler ──────────────────────────────────────────────────────────────
-
-    def _scheduler_loop(self):
-        """Background daemon: runs all periodic and daily tasks."""
-        self._start_time = time.time()
-        self._last_30min = time.time()
-        self._last_2h    = time.time()
-        self._last_6h    = time.time()
-        self._last_24h   = time.time()
-        _daily_ran: dict = {}
-
-        while True:
-            try:
-                now       = time.time()
-                utc_hour  = datetime.now(timezone.utc).hour
-                utc_date  = datetime.now(timezone.utc).date().isoformat()
-
-                # Interval tasks
-                if now - self._last_30min >= 1800:
-                    self._check_30min()
-                    _poll_telegram_commands(self)
-                    self._last_30min = now
-
-                if now - self._last_2h >= 7200:
-                    self._send_telegram_report()
-                    # Drift monitor — every 2h
-                    if self._drift_monitor:
-                        try:
-                            threading.Thread(
-                                target=self._drift_monitor.evaluate_all_pairs,
-                                daemon=True,
-                            ).start()
-                        except Exception:
-                            pass
-                    # Paper trading evaluation — every 2h
-                    if self._paper_engine:
-                        try:
-                            threading.Thread(
-                                target=self._paper_engine.evaluate_readiness,
-                                daemon=True,
-                            ).start()
-                        except Exception:
-                            pass
-                    self._last_2h = now
-
-                if now - self._last_6h >= 21600:
-                    github_sync(self.iteration, self.xauusd_best_wr)
-                    # Notion sync
-                    try:
-                        from reporting.notion_sync import run_full_sync
-                        threading.Thread(target=run_full_sync, daemon=True).start()
-                    except Exception:
-                        pass
-                    # Walk-forward validation — every 6h
-                    if self._wf_validator:
-                        try:
-                            threading.Thread(
-                                target=self._wf_validator.run_all_pairs,
-                                daemon=True,
-                            ).start()
-                        except Exception:
-                            pass
-                    # News filter cache refresh
-                    if self._news_filter:
-                        try:
-                            self._news_filter._last_news_fetch = 0.0  # force refresh
-                        except Exception:
-                            pass
-                    self._last_6h = now
-
-                if now - self._last_24h >= 86400:
-                    self._refresh_data(force=True)
-                    self._last_24h = now
-
-                # Daily tasks by UTC hour
-                for task_key, hour in [
-                    ("monthly_backtest", 3),  # overnight — no conflict with evolution
-                    ("evolution_email", 8),
-                    ("backtest_email",  9),
-                    ("pair_ranking",   20),
-                    ("ftmo_check",     22),
-                ]:
-                    if (utc_hour == hour
-                            and _daily_ran.get(f"{utc_date}_{task_key}") is None):
-                        _daily_ran[f"{utc_date}_{task_key}"] = True
-                        if task_key == "monthly_backtest":
-                            # Run in its own thread to avoid blocking scheduler loop
-                            threading.Thread(
-                                target=self.run_monthly_backtest, daemon=True
-                            ).start()
-                        elif task_key == "evolution_email":
-                            self._send_evolution_email()
-                        elif task_key == "backtest_email":
-                            self._send_backtest_email()
-                        elif task_key == "pair_ranking":
-                            self._send_full_report()
-                        elif task_key == "ftmo_check":
-                            self.ftmo_check()
-
-                # Clean up old daily task keys
-                if len(_daily_ran) > 200:
-                    _daily_ran = {k: v for k, v in _daily_ran.items()
-                                  if k.startswith(utc_date)}
-
-            except Exception as e:
-                logger.debug(f"Scheduler error: {e}")
-
-            time.sleep(30)
-
-    def _check_30min(self):
-        """30-min health check: stall detection, resource check."""
+    # ── Scheduled email ────────────────────────────────────────────────────────
+    def send_email_if_scheduled(self):
         try:
-            state_age = time.time() - os.path.getmtime(STATE_FILE) \
-                        if os.path.exists(STATE_FILE) else 9999
-            if state_age > 3600:
-                send_telegram(f"⚠️ STALL: state file not updated for {state_age/60:.0f} min")
+            now_utc = datetime.now(timezone.utc)
+            h, m = now_utc.hour, now_utc.minute
 
-            # RAM check
-            try:
-                import psutil
-                ram = psutil.virtual_memory().percent
-                cpu = psutil.cpu_percent(interval=1)
-                if ram > 90:
-                    send_telegram(f"⚠️ HIGH RAM: {ram:.0f}%")
-                if cpu > 95:
-                    send_telegram(f"⚠️ HIGH CPU: {cpu:.0f}%")
-            except ImportError:
-                pass
+            # 08:00 UTC — evolution report
+            if h == 8 and m < 5 and not _email_sent_today("daily_evolution"):
+                top = sorted(self.best_expectancy.items(), key=lambda x: -x[1])[:8]
+                rows = "".join(
+                    f"<tr><td>{p}</td><td>{self.best_wr.get(p,0):.1%}</td>"
+                    f"<td>{e:.3f}R</td></tr>"
+                    for p, e in top)
+                html = (f"<h2>Evolution Report — {now_utc.strftime('%Y-%m-%d')}</h2>"
+                        f"<p>Iteration: {self.iteration:,}</p>"
+                        f"<table><tr><th>Pair</th><th>WR</th><th>Expectancy</th></tr>"
+                        f"{rows}</table>")
+                send_email("AutoTrader — Daily Evolution Report", html, "daily_evolution")
+
+            # 09:00 UTC — MT5 trade report
+            if h == 9 and m < 5 and not _email_sent_today("daily_trade"):
+                trades_html = "<p>Paper trades: see Telegram for live trade updates.</p>"
+                send_email("AutoTrader — Daily Trade Report", trades_html, "daily_trade")
+
+        except Exception as e:
+            log.debug(f"Email schedule error: {e}")
+
+    # ── Hourly log ─────────────────────────────────────────────────────────────
+    def _log_hourly(self):
+        self._last_hour_log = time.time()
+        ram = get_ram_pct()
+        mt5 = ensure_mt5()
+        top_pair = max(self.best_expectancy, key=self.best_expectancy.get) \
+                   if self.best_expectancy else "None"
+        top_exp  = self.best_expectancy.get(top_pair, 0)
+        log.info(
+            f"HOURLY | iter={self.iteration:,} | "
+            f"best={top_pair} E={top_exp:.3f} | "
+            f"RAM={ram:.0f}% | MT5={'ON' if mt5 else 'OFF'}"
+        )
+
+    # ── Resource guard ─────────────────────────────────────────────────────────
+    def check_resources(self):
+        try:
+            ram = get_ram_pct()
+            if ram > 92:
+                log.warning(f"HIGH RAM {ram:.0f}% — clearing cache")
+                send_telegram(f"⚠️ HIGH RAM {ram:.0f}% — clearing cache, pausing briefly")
+                _data_cache.clear()
+                gc.collect()
+                time.sleep(30)
+            elif ram > 85:
+                log.warning(f"RAM {ram:.0f}% — clearing data cache")
+                _data_cache.clear()
+                gc.collect()
         except Exception:
             pass
 
-    def _send_backtest_email(self):
-        """Daily 09:00 email with monthly backtest history table."""
-        if not self.monthly_db:
+    # ── MT5 paper trading ──────────────────────────────────────────────────────
+    def check_and_trade(self):
+        """Check current bar signals and place demo trades if conditions met."""
+        if not ensure_mt5():
             return
-        subject = f"AutoTrader Backtest History {datetime.now().strftime('%Y-%m-%d')}"
-        html = self._monthly_table_html()
-        if not html:
-            return
-        send_email(subject, f"<html><body style='background:#1a1a2e;color:#eee;font-family:monospace'>{html}</body></html>")
-
-    # ── Module loader ──────────────────────────────────────────────────────────
-
-    def _import_modules(self):
         try:
-            from strategy.trend_engine import TrendParams
-            from backtester.walk_forward import WalkForwardBacktester
-            self._tp_cls  = TrendParams
-            self._wf_cls  = WalkForwardBacktester
-            logger.info("Core modules loaded: TrendParams, WalkForwardBacktester")
-        except Exception as e:
-            logger.critical(f"Cannot load core modules: {e}")
-            raise
+            # Count current open trades
+            positions = _mt5.positions_get()
+            n_open = len(positions) if positions else 0
+            if n_open >= MAX_OPEN_TRADES:
+                return
 
-        # Phase 3-8 engines — non-critical, load best-effort
-        try:
-            from analytics.live_drift_monitor import LiveDriftMonitor
-            self._drift_monitor = LiveDriftMonitor()
-            logger.info("LiveDriftMonitor loaded")
-        except Exception as e:
-            logger.debug(f"LiveDriftMonitor unavailable: {e}")
+            # Check each pair with a known good strategy
+            for pair in PAIRS:
+                if n_open >= MAX_OPEN_TRADES:
+                    break
+                params = self.best_params.get(pair)
+                exp    = self.best_expectancy.get(pair, 0)
+                if params is None or exp <= 0:
+                    continue
 
-        try:
-            from portfolio.live_exposure_engine import LiveExposureEngine
-            self._exposure_engine = LiveExposureEngine()
-            logger.info("LiveExposureEngine loaded")
-        except Exception as e:
-            logger.debug(f"LiveExposureEngine unavailable: {e}")
+                # Get fresh data
+                data = get_data(pair)
+                if data is None or len(data) < 220:
+                    continue
 
-        try:
-            from risk.news_volatility_filter import NewsVolatilityFilter
-            self._news_filter = NewsVolatilityFilter()
-            logger.info("NewsVolatilityFilter loaded")
-        except Exception as e:
-            logger.debug(f"NewsVolatilityFilter unavailable: {e}")
+                # Check latest completed bar for signal
+                signals = generate_signals(data, params)
+                if not signals:
+                    continue
 
-        try:
-            from execution.paper_trading import PaperTradingEngine
-            self._paper_engine = PaperTradingEngine()
-            logger.info(f"PaperTradingEngine loaded — mode={self._paper_engine._state.mode}")
-        except Exception as e:
-            logger.debug(f"PaperTradingEngine unavailable: {e}")
+                last_sig = signals[-1]
+                # Signal must be very recent (last 2 bars)
+                if len(data) - last_sig["idx"] > 2:
+                    continue
 
-        try:
-            from validation.walk_forward_validator import WalkForwardValidator
-            self._wf_validator = WalkForwardValidator()
-            logger.info("WalkForwardValidator loaded")
-        except Exception as e:
-            logger.debug(f"WalkForwardValidator unavailable: {e}")
+                direction = last_sig["direction"]
+                atr       = last_sig["atr"]
+                sl_mult   = float(params.get("sl_atr_mult", 0.5))
+                tp_rrr    = float(params.get("tp_rrr", 3.0))
 
-        try:
-            from core.resource_monitor import ResourceMonitor
-            self._resource_mon = ResourceMonitor()
-            logger.info("ResourceMonitor loaded")
-        except Exception as e:
-            logger.debug(f"ResourceMonitor unavailable: {e}")
+                # Calculate lot size: 1% risk of account
+                acct = _mt5.account_info()
+                if acct is None:
+                    continue
+                balance   = acct.balance
+                risk_usd  = balance * RISK_PER_TRADE
+                sl_dist   = sl_mult * atr
+                lot_units = LOT_SIZE.get(pair, 100000)
+                lots      = round(risk_usd / (sl_dist * lot_units), 2)
+                lots      = max(0.01, min(lots, 0.50))
 
-        try:
-            from evolution.evolution_engine import get_engine as _get_evo
-            _get_evo()  # init singleton
-            logger.info("EvolutionEngine loaded")
-        except Exception as e:
-            logger.debug(f"EvolutionEngine unavailable: {e}")
+                placed = self.place_demo_trade(pair, direction, sl_dist, tp_rrr * sl_dist, lots)
+                if placed:
+                    n_open += 1
+                    msg = (f"📈 PAPER TRADE [{pair}]\n"
+                           f"Direction: {direction.upper()}\n"
+                           f"Lots: {lots} | Risk: ${risk_usd:.0f}\n"
+                           f"SL: {sl_dist:.4f} | TP: {tp_rrr * sl_dist:.4f}\n"
+                           f"E={exp:.3f} | Account: ${balance:,.0f}")
+                    send_telegram(msg)
+                    log.info(f"Paper trade placed: {pair} {direction}")
 
-        try:
-            from portfolio.portfolio_engine import get_portfolio
-            get_portfolio()  # init singleton
-            logger.info("PortfolioEngine loaded")
         except Exception as e:
-            logger.debug(f"PortfolioEngine unavailable: {e}")
+            log.warning(f"check_and_trade error: {e}")
+
+    def place_demo_trade(self, pair: str, direction: str,
+                         sl_dist: float, tp_dist: float, lots: float) -> bool:
+        """Place order on MT5 demo account."""
+        try:
+            symbol = MT5_SYMBOL_MAP.get(pair, pair)
+            tick   = _mt5.symbol_info_tick(symbol)
+            if tick is None:
+                log.warning(f"No tick data for {symbol}")
+                return False
+
+            if direction == "long":
+                price = tick.ask
+                sl    = round(price - sl_dist, 5)
+                tp    = round(price + tp_dist, 5)
+                order_type = _mt5.ORDER_TYPE_BUY
+            else:
+                price = tick.bid
+                sl    = round(price + sl_dist, 5)
+                tp    = round(price - tp_dist, 5)
+                order_type = _mt5.ORDER_TYPE_SELL
+
+            request = {
+                "action":      _mt5.TRADE_ACTION_DEAL,
+                "symbol":      symbol,
+                "volume":      lots,
+                "type":        order_type,
+                "price":       price,
+                "sl":          sl,
+                "tp":          tp,
+                "deviation":   20,
+                "magic":       234000,
+                "comment":     "AutoTrader OMEGA",
+                "type_time":   _mt5.ORDER_TIME_GTC,
+                "type_filling":_mt5.ORDER_FILLING_IOC,
+            }
+            result = _mt5.order_send(request)
+            if result is None:
+                log.warning(f"order_send returned None for {pair}")
+                return False
+            if result.retcode == _mt5.TRADE_RETCODE_DONE:
+                log.info(f"Trade placed: {pair} {direction} {lots} lots @{price:.5f}")
+                return True
+            else:
+                log.warning(f"Trade failed {pair}: {result.retcode} — {result.comment}")
+                return False
+        except Exception as e:
+            log.warning(f"place_demo_trade error {pair}: {e}")
+            return False
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    engine = AutoTraderEngine()
-    engine.run_forever()
+    AutoTrader().run_forever()
