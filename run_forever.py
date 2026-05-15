@@ -1,16 +1,19 @@
 """
-AutoTrader OMEGA — Clean Rebuild v3.0
-Self-contained. Simple. Stable. Runs forever.
+AutoTrader OMEGA — MARKET ADAPTIVE ROBOT v4.0
+NO FIXED STRATEGY. PURE ADAPTATION.
 
-Target: 60-75% WR | 2.0-5.0 RRR | Expectancy positive and growing
-MT5 Demo paper trading | 4H bars | 12 pairs
+Reads market condition every 5 min, selects behavior, executes with risk control.
+Learns from every trade. Evolves continuously. Never stops.
+
+MT5 Demo: 107089479 | MetaQuotes-Demo
+Target: $5000 → $5500 (10% on demo) → FTMO ready
 """
 
 import os, sys, json, time, gc, signal, logging, subprocess, smtplib, ssl
-import random, copy
-from datetime import datetime, timezone
+import random, copy, threading
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import urllib.request
@@ -18,7 +21,7 @@ import urllib.request
 import numpy as np
 import pandas as pd
 
-# ── Never die on SIGTERM ───────────────────────────────────────────────────────
+# ── Never die ──────────────────────────────────────────────────────────────────
 def _handle_signal(sig, frame):
     logging.warning(f"Signal {sig} received — staying alive")
 
@@ -26,19 +29,21 @@ signal.signal(signal.SIGTERM, _handle_signal)
 try:
     signal.signal(signal.SIGHUP, _handle_signal)
 except AttributeError:
-    pass  # Windows
+    pass
 
-# ── Logging ────────────────────────────────────────────────────────────────────
+# ── Paths & logging ────────────────────────────────────────────────────────────
 ROOT    = Path(__file__).parent
 LOGDIR  = ROOT / "logs"
+DATADIR = ROOT / "data"
 LOGDIR.mkdir(exist_ok=True)
+DATADIR.mkdir(exist_ok=True)
 LOG_FILE = LOGDIR / f"engine_{datetime.now().strftime('%Y-%m-%d')}.log"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
 )
 log = logging.getLogger(__name__)
 
@@ -55,85 +60,54 @@ MT5_SERVER   = os.environ.get("MT5_SERVER", "")
 TG_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT      = os.environ.get("TELEGRAM_CHAT_ID", "")
 GH_TOKEN     = os.environ.get("GITHUB_TOKEN", "")
-GH_USER      = os.environ.get("GITHUB_USER", "Upwosti")
+GH_USER      = os.environ.get("GITHUB_USERNAME", "Upwosti")
 GH_REPO      = os.environ.get("GITHUB_REPO", "autotrader-claude")
 EMAIL_FROM   = os.environ.get("EMAIL_SENDER", "")
 EMAIL_PASS   = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_TO     = os.environ.get("EMAIL_RECEIVER", "")
 
-# ── Pairs & mappings ───────────────────────────────────────────────────────────
-PAIRS = [
-    "XAUUSD", "GBPUSD", "EURUSD", "USDJPY", "GBPJPY",
-    "AUDUSD", "USDCAD", "BTCUSD", "ETHUSD", "NAS100", "US30", "XAGUSD",
-]
+# ── Config ─────────────────────────────────────────────────────────────────────
+PAIRS = ["XAUUSD", "GBPUSD", "EURUSD", "USDJPY", "GBPJPY",
+         "BTCUSD", "NAS100", "US30", "AUDUSD"]
 
-MT5_SYMBOL_MAP = {
-    "XAUUSD": "XAUUSD", "GBPUSD": "GBPUSD", "EURUSD": "EURUSD",
-    "USDJPY": "USDJPY", "GBPJPY": "GBPJPY", "AUDUSD": "AUDUSD",
-    "USDCAD": "USDCAD", "BTCUSD": "BTCUSD", "ETHUSD": "ETHUSD",
-    "NAS100": "NAS100", "US30": "US30",     "XAGUSD": "XAGUSD",
+# Risk hard rules
+MAX_RISK_PER_TRADE = 0.01   # 1%
+MAX_DAILY_LOSS     = 0.03   # 3%
+MAX_OPEN_TRADES    = 2
+MAX_CORRELATED     = 1
+MIN_RRR            = 2.0
+MIN_CONFIDENCE     = 0.65
+
+START_BALANCE_TARGET = 5500.0
+START_BALANCE_BASE   = 5000.0
+
+STATE_FILE      = ROOT / "state.json"
+PAIR_PROFILES   = DATADIR / "pair_profiles.json"
+EMAIL_TRACKER   = ROOT / "email_tracker.json"
+TRADE_TAGS      = DATADIR / "trade_tags.json"
+DAILY_PNL_FILE  = DATADIR / "daily_pnl.json"
+
+# Pip values (USD per 1 lot per 1 pip)
+PIP_VALUE = {
+    "XAUUSD": 10.0, "GBPUSD": 10.0, "EURUSD": 10.0,
+    "USDJPY": 9.0, "GBPJPY": 8.5,  "AUDUSD": 10.0,
+    "USDCAD": 7.5, "BTCUSD": 1.0,  "ETHUSD": 1.0,
+    "NAS100": 1.0, "US30":   1.0,  "XAGUSD": 50.0,
 }
 
-YF_TICKERS = {
-    "XAUUSD": "GC=F",      "GBPUSD": "GBPUSD=X", "EURUSD": "EURUSD=X",
-    "USDJPY": "USDJPY=X",  "GBPJPY": "GBPJPY=X", "AUDUSD": "AUDUSD=X",
-    "USDCAD": "USDCAD=X",  "BTCUSD": "BTC-USD",  "ETHUSD": "ETH-USD",
-    "NAS100": "^IXIC",     "US30":   "^DJI",      "XAGUSD": "SI=F",
+# Correlation groups (one trade per group)
+CORRELATION_GROUPS = {
+    "metals":    ["XAUUSD", "XAGUSD"],
+    "usd_majors":["EURUSD", "GBPUSD", "AUDUSD", "USDCAD", "USDJPY"],
+    "jpy_cross": ["USDJPY", "GBPJPY"],
+    "crypto":    ["BTCUSD", "ETHUSD"],
+    "us_indices":["NAS100", "US30"],
 }
-
-# Spread per pair (price units, realistic)
-SPREAD = {
-    "XAUUSD": 0.30, "XAGUSD": 0.035, "GBPUSD": 0.00008,
-    "EURUSD": 0.00006, "USDJPY": 0.07, "GBPJPY": 0.15,
-    "AUDUSD": 0.00009, "USDCAD": 0.00010, "BTCUSD": 15.0,
-    "ETHUSD": 0.80, "NAS100": 1.0, "US30": 2.0,
-}
-
-# Lot sizes for risk calculation
-LOT_SIZE = {
-    "XAUUSD": 100, "XAGUSD": 5000, "GBPUSD": 100000,
-    "EURUSD": 100000, "USDJPY": 100000, "GBPJPY": 100000,
-    "AUDUSD": 100000, "USDCAD": 100000, "BTCUSD": 1,
-    "ETHUSD": 1, "NAS100": 1, "US30": 1,
-}
-
-# ── Parameter space ────────────────────────────────────────────────────────────
-PARAM_RANGES = {
-    "ema_fast":       [8, 13, 21, 34],
-    "ema_slow":       [34, 50, 89, 144],
-    "rsi_period":     [10, 14, 21],
-    "rsi_long_max":   [55, 60, 65, 68],
-    "rsi_short_min":  [32, 35, 40, 45],
-    "atr_period":     [10, 14, 21],
-    "sl_atr_mult":    [0.3, 0.4, 0.5, 0.6, 0.8],
-    "tp_rrr":         [2.0, 2.5, 3.0, 4.0, 5.0],
-    "trail_atr_mult": [1.0, 1.5, 2.0, 2.5],
-    "partial1_r":     [1.5, 2.0],
-    "partial2_r":     [2.5, 3.0],
-    "min_adx":        [20, 25, 30],
-    "use_adx":        [True, False],
-    "use_ema_stack":  [True, False],
-    "min_confluence": [2, 3, 4],
-}
-
-PARAM_PRIORITIES = [
-    "tp_rrr", "sl_atr_mult", "trail_atr_mult",
-    "partial1_r", "partial2_r", "min_confluence",
-    "ema_fast", "ema_slow", "rsi_long_max",
-    "min_adx", "use_adx", "use_ema_stack",
-    "rsi_period", "atr_period", "rsi_short_min",
-]
-
-STATE_FILE     = ROOT / "state.json"
-EMAIL_TRACKER  = ROOT / "email_tracker.json"
-MAX_OPEN_TRADES = 2
-RISK_PER_TRADE  = 0.01   # 1% of account
 
 # ── MT5 connection ─────────────────────────────────────────────────────────────
 _mt5           = None
 _mt5_connected = False
 _mt5_last_try  = 0.0
-
 
 def connect_mt5() -> bool:
     global _mt5, _mt5_connected, _mt5_last_try
@@ -152,443 +126,727 @@ def connect_mt5() -> bool:
                 return False
         info = mt5.account_info()
         if info is None:
-            log.warning("MT5 account_info is None — not connected")
+            log.warning("MT5 account_info is None")
             mt5.shutdown()
             return False
-        log.info(f"MT5 connected | {info.name} | {info.server} | Balance: ${info.balance:,.2f}")
+        log.info(f"MT5 CONNECTED | {info.name} | {info.server} | Balance: ${info.balance:,.2f}")
         _mt5_connected = True
         return True
     except ImportError:
-        log.warning("MetaTrader5 library not installed — install with: pip install MetaTrader5")
+        log.warning("MetaTrader5 not installed — pip install MetaTrader5")
         return False
     except Exception as e:
         log.warning(f"MT5 connect error: {e}")
         return False
 
-
 def ensure_mt5() -> bool:
-    """Return True if MT5 connected. Retry every 60s."""
     global _mt5_connected
     if _mt5_connected and _mt5 is not None:
         try:
-            info = _mt5.account_info()
-            if info is not None:
+            if _mt5.account_info() is not None:
                 return True
         except Exception:
             pass
         _mt5_connected = False
-    if time.time() - _mt5_last_try > 60:
+    if time.time() - _mt5_last_try > 30:
         _mt5_connected = connect_mt5()
     return _mt5_connected
-
-
-# ── Data cache ─────────────────────────────────────────────────────────────────
-_data_cache: Dict[str, tuple] = {}
-CACHE_TTL = 6 * 3600  # 6 hours
-
-
-def get_data(pair: str) -> Optional[pd.DataFrame]:
-    """4H OHLCV. MT5 primary → yfinance fallback. Cache 6h."""
-    now = time.time()
-    if pair in _data_cache:
-        df_c, ts = _data_cache[pair]
-        if now - ts < CACHE_TTL:
-            return df_c
-
-    df = None
-
-    # ── MT5 path ───────────────────────────────────────────────────────────────
-    if ensure_mt5() and _mt5 is not None:
-        try:
-            symbol = MT5_SYMBOL_MAP.get(pair, pair)
-            rates  = _mt5.copy_rates_from_pos(symbol, _mt5.TIMEFRAME_H4, 0, 2500)
-            if rates is not None and len(rates) > 200:
-                df = pd.DataFrame(rates)
-                df["time"] = pd.to_datetime(df["time"], unit="s")
-                df.set_index("time", inplace=True)
-                df = df[["open", "high", "low", "close", "tick_volume"]].rename(
-                    columns={"tick_volume": "volume"})
-                log.debug(f"MT5 data {pair}: {len(df)} 4H bars")
-        except Exception as e:
-            log.debug(f"MT5 data error {pair}: {e}")
-            df = None
-
-    # ── yfinance fallback ──────────────────────────────────────────────────────
-    if df is None or len(df) < 200:
-        try:
-            import yfinance as yf
-            ticker = YF_TICKERS.get(pair, pair)
-            raw = yf.download(ticker, period="2y", interval="1h",
-                              progress=False, auto_adjust=True)
-            if raw is not None and len(raw) > 200:
-                raw.columns = [c[0].lower() if isinstance(c, tuple) else c.lower()
-                               for c in raw.columns]
-                df = raw.resample("4h").agg({
-                    "open": "first", "high": "max",
-                    "low": "min", "close": "last", "volume": "sum"
-                }).dropna()
-                if len(df) > 200:
-                    log.debug(f"yfinance data {pair}: {len(df)} 4H bars")
-        except Exception as e:
-            log.debug(f"yfinance error {pair}: {e}")
-
-    if df is not None and len(df) > 200:
-        _data_cache[pair] = (df.copy(), now)
-        return df
-
-    return None
-
-
-# ── Technical indicators ───────────────────────────────────────────────────────
-def add_indicators(df: pd.DataFrame, params: dict) -> pd.DataFrame:
-    df = df.copy()
-    ef = int(params.get("ema_fast", 21))
-    es = int(params.get("ema_slow", 89))
-    rp = int(params.get("rsi_period", 14))
-    ap = int(params.get("atr_period", 14))
-
-    df["ema_fast"] = df["close"].ewm(span=ef, adjust=False).mean()
-    df["ema_slow"] = df["close"].ewm(span=es, adjust=False).mean()
-    df["ema_200"]  = df["close"].ewm(span=200, adjust=False).mean()
-
-    # RSI
-    delta = df["close"].diff()
-    gain  = delta.clip(lower=0).ewm(span=rp, adjust=False).mean()
-    loss  = (-delta.clip(upper=0)).ewm(span=rp, adjust=False).mean()
-    rs    = gain / loss.replace(0, 1e-9)
-    df["rsi"] = 100 - 100 / (1 + rs)
-
-    # ATR
-    hl  = df["high"] - df["low"]
-    hc  = (df["high"] - df["close"].shift()).abs()
-    lc  = (df["low"]  - df["close"].shift()).abs()
-    tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(span=ap, adjust=False).mean()
-
-    # ADX
-    pdm = df["high"].diff().clip(lower=0)
-    ndm = (-df["low"].diff()).clip(lower=0)
-    pdm = pdm.where(pdm > ndm, 0.0)
-    ndm = ndm.where(ndm > pdm, 0.0)
-    atr_s  = tr.ewm(span=ap, adjust=False).mean()
-    pdi    = 100 * pdm.ewm(span=ap, adjust=False).mean() / atr_s.replace(0, 1e-9)
-    ndi    = 100 * ndm.ewm(span=ap, adjust=False).mean() / atr_s.replace(0, 1e-9)
-    dx     = 100 * (pdi - ndi).abs() / (pdi + ndi).replace(0, 1e-9)
-    df["adx"] = dx.ewm(span=ap, adjust=False).mean()
-
-    return df
-
-
-def generate_signals(df: pd.DataFrame, params: dict) -> List[dict]:
-    """Generate long/short entry signals from indicator crossovers."""
-    df = add_indicators(df, params)
-
-    rsi_long_max  = float(params.get("rsi_long_max",  65))
-    rsi_short_min = float(params.get("rsi_short_min", 35))
-    min_adx       = float(params.get("min_adx",       25))
-    use_adx       = bool(params.get("use_adx",       True))
-    use_ema_stack = bool(params.get("use_ema_stack", True))
-    min_conf      = int(params.get("min_confluence",   3))
-    atr_arr       = df["atr"].values
-    close_arr     = df["close"].values
-    n             = len(df)
-
-    signals = []
-    for i in range(210, n):
-        ef_prev = df["ema_fast"].iloc[i - 1]
-        es_prev = df["ema_slow"].iloc[i - 1]
-        ef_cur  = df["ema_fast"].iloc[i]
-        es_cur  = df["ema_slow"].iloc[i]
-        rsi_cur = df["rsi"].iloc[i]
-        adx_cur = df["adx"].iloc[i]
-        atr_cur = df["atr"].iloc[i]
-        cl_cur  = df["close"].iloc[i]
-        em200   = df["ema_200"].iloc[i]
-
-        if pd.isna(atr_cur) or atr_cur <= 0:
-            continue
-
-        # ATR expanding vs 20-bar avg
-        atr_avg = atr_arr[max(0, i - 20):i].mean()
-        atr_ok  = atr_cur > atr_avg * 0.8
-
-        # Long signal
-        cross_long  = ef_prev < es_prev and ef_cur >= es_cur
-        if cross_long:
-            conf = sum([
-                rsi_cur < rsi_long_max,
-                (adx_cur >= min_adx) if use_adx else True,
-                (cl_cur > em200) if use_ema_stack else True,
-                cl_cur > ef_cur,
-                atr_ok,
-            ])
-            if conf >= min_conf:
-                signals.append({"idx": i, "direction": "long",
-                                "close": float(cl_cur), "atr": float(atr_cur)})
-
-        # Short signal
-        cross_short = ef_prev > es_prev and ef_cur <= es_cur
-        if cross_short:
-            conf = sum([
-                rsi_cur > rsi_short_min,
-                (adx_cur >= min_adx) if use_adx else True,
-                (cl_cur < em200) if use_ema_stack else True,
-                cl_cur < ef_cur,
-                atr_ok,
-            ])
-            if conf >= min_conf:
-                signals.append({"idx": i, "direction": "short",
-                                "close": float(cl_cur), "atr": float(atr_cur)})
-
-    return signals
-
-
-# ── Backtester ─────────────────────────────────────────────────────────────────
-def run_backtest(df: pd.DataFrame, pair: str, params: dict) -> Optional[dict]:
-    """
-    70/30 walk-forward backtest with realistic partial exits.
-    Exit structure: 25% at partial1_r, 25% at partial2_r, 50% runner with trail.
-    Returns dict with wr, avg_win, avg_loss, pf, dd, avg_rrr, trades.
-    """
-    df_ind = add_indicators(df, params)
-    signals = generate_signals(df, params)
-
-    if len(signals) < 10:
-        return None
-
-    split   = int(len(df) * 0.70)
-    t_sigs  = [s for s in signals if s["idx"] >= split]
-
-    if len(t_sigs) < 8:
-        return None
-
-    # Overfit check via train signals
-    tr_sigs = [s for s in signals if s["idx"] < split]
-
-    spread_val = SPREAD.get(pair, 0.0001)
-    sl_mult    = float(params.get("sl_atr_mult",    0.5))
-    tp_rrr     = float(params.get("tp_rrr",         3.0))
-    trail_m    = float(params.get("trail_atr_mult",  1.5))
-    p1_r       = float(params.get("partial1_r",     1.5))
-    p2_r       = float(params.get("partial2_r",     2.5))
-
-    def simulate(sigs: list) -> List[dict]:
-        trades = []
-        for s in sigs:
-            idx       = s["idx"]
-            atr       = s["atr"]
-            direction = s["direction"]
-            entry_raw = s["close"]
-
-            if direction == "long":
-                entry = entry_raw + spread_val
-                sl_p  = entry - sl_mult * atr
-            else:
-                entry = entry_raw - spread_val
-                sl_p  = entry + sl_mult * atr
-
-            risk = abs(entry - sl_p)
-            if risk <= 0 or risk > entry * 0.20:
-                continue
-
-            if direction == "long":
-                tp_p = entry + tp_rrr * risk
-                p1_p = entry + p1_r  * risk
-                p2_p = entry + p2_r  * risk
-            else:
-                tp_p = entry - tp_rrr * risk
-                p1_p = entry - p1_r  * risk
-                p2_p = entry - p2_r  * risk
-
-            p1_done = p2_done = False
-            partial_pnl = 0.0
-            trail = sl_p
-            pnl_r = None
-
-            for j in range(idx + 1, min(idx + 250, len(df_ind))):
-                bar   = df_ind.iloc[j]
-                hi    = float(bar["high"])
-                lo    = float(bar["low"])
-                cl    = float(bar["close"])
-                op    = float(bar.get("open", (hi + lo) / 2))
-                atr_j = float(bar["atr"]) if not pd.isna(bar["atr"]) else atr
-
-                # Partial 1 — 25% at p1_r
-                if not p1_done:
-                    hit1 = (direction == "long" and hi >= p1_p) or \
-                           (direction == "short" and lo <= p1_p)
-                    if hit1:
-                        partial_pnl += 0.25 * p1_r
-                        p1_done = True
-                        trail = entry  # move SL to breakeven
-
-                # Partial 2 — 25% at p2_r
-                if p1_done and not p2_done:
-                    hit2 = (direction == "long" and hi >= p2_p) or \
-                           (direction == "short" and lo <= p2_p)
-                    if hit2:
-                        partial_pnl += 0.25 * p2_r
-                        p2_done = True
-
-                # Update trailing stop
-                if p1_done and atr_j > 0:
-                    if direction == "long":
-                        trail = max(trail, cl - trail_m * atr_j)
-                    else:
-                        trail = min(trail, cl + trail_m * atr_j)
-
-                cur_sl = trail if p1_done else sl_p
-
-                sl_hit = (direction == "long"  and lo <= cur_sl) or \
-                         (direction == "short" and hi >= cur_sl)
-                tp_hit = (direction == "long"  and hi >= tp_p) or \
-                         (direction == "short" and lo <= tp_p)
-
-                if sl_hit or tp_hit:
-                    if tp_hit and not sl_hit:
-                        pnl_r = partial_pnl + 0.50 * tp_rrr
-                    elif sl_hit and not tp_hit:
-                        if p1_done:
-                            runner_rrr = abs(cur_sl - entry) / risk if risk > 0 else 0
-                            if direction == "short":
-                                runner_rrr = abs(entry - cur_sl) / risk if risk > 0 else 0
-                            pnl_r = partial_pnl + 0.50 * (runner_rrr if cur_sl != sl_p else -1.0)
-                        else:
-                            pnl_r = -1.0
-                    else:
-                        # Both hit same bar — use bar direction
-                        bar_bull = cl >= op
-                        if (direction == "long" and bar_bull) or (direction == "short" and not bar_bull):
-                            pnl_r = partial_pnl + 0.50 * tp_rrr
-                        else:
-                            pnl_r = partial_pnl - (0.50 if p1_done else 1.0)
-                    break
-
-            if pnl_r is None:
-                # Timed out — close at last bar
-                last = float(df_ind.iloc[min(idx + 249, len(df_ind) - 1)]["close"])
-                raw  = (last - entry) / risk if direction == "long" else (entry - last) / risk
-                pnl_r = (partial_pnl + 0.50 * raw) if p1_done else raw
-
-            trades.append({"pnl_r": round(pnl_r, 4),
-                           "win":  pnl_r > 0})
-        return trades
-
-    test_trades  = simulate(t_sigs)
-    train_trades = simulate(tr_sigs)
-
-    if len(test_trades) < 8:
-        return None
-
-    def stats(trades):
-        if not trades:
-            return None
-        wins   = [t["pnl_r"] for t in trades if t["win"]]
-        losses = [t["pnl_r"] for t in trades if not t["win"]]
-        n      = len(trades)
-        wr     = len(wins) / n
-        avg_w  = sum(wins)  / max(len(wins),   1)
-        avg_l  = abs(sum(losses) / max(len(losses), 1))
-        pf     = sum(wins) / max(abs(sum(losses)), 1e-9) if losses else 99.0
-        # Max drawdown
-        eq, peak, dd = 0.0, 0.0, 0.0
-        for t in trades:
-            eq += t["pnl_r"]
-            if eq > peak:
-                peak = eq
-            dd = max(dd, (peak - eq) / max(abs(peak), 1e-9))
-        avg_rrr = sum(abs(w) for w in wins) / max(len(wins), 1)
-        return {"wr": wr, "avg_w": avg_w, "avg_l": avg_l,
-                "pf": pf, "dd": dd, "avg_rrr": avg_rrr, "n": n}
-
-    s   = stats(test_trades)
-    tr  = stats(train_trades)
-    if s is None:
-        return None
-
-    # Overfit guard: if train WR >> test WR, reject
-    if tr and tr["wr"] - s["wr"] > 0.20 and tr["wr"] > 0.65:
-        return None
-
-    return {
-        "wr":       round(s["wr"],     4),
-        "avg_win":  round(s["avg_w"],  4),
-        "avg_loss": round(s["avg_l"],  4),
-        "pf":       round(s["pf"],     3),
-        "dd":       round(s["dd"],     4),
-        "avg_rrr":  round(s["avg_rrr"],3),
-        "trades":   s["n"],
-        "train_wr": round(tr["wr"], 4) if tr else s["wr"],
-    }
-
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def send_telegram(msg: str) -> bool:
     if not TG_TOKEN or not TG_CHAT:
         return False
     try:
-        body = json.dumps({"chat_id": TG_CHAT, "text": msg[:4096]}).encode()
-        req  = urllib.request.Request(
+        data = json.dumps({"chat_id": TG_CHAT, "text": msg}).encode("utf-8")
+        req = urllib.request.Request(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data=body, headers={"Content-Type": "application/json"}, method="POST")
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        urllib.request.urlopen(req, timeout=10, context=ctx)
+            data=data, headers={"Content-Type": "application/json; charset=utf-8"})
+        urllib.request.urlopen(req, timeout=15)
         return True
     except Exception as e:
-        log.debug(f"Telegram error: {e}")
+        log.debug(f"Telegram failed: {e}")
         return False
 
+# ── MT5 data fetcher ───────────────────────────────────────────────────────────
+_TF_MAP = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 16385, "H4": 16388, "D1": 16408}
 
-# ── Email ──────────────────────────────────────────────────────────────────────
-def _email_sent_today(key: str) -> bool:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def get_mt5_data(pair: str, timeframe: str, bars: int) -> Optional[pd.DataFrame]:
+    """Live MT5 OHLCV. timeframe = 'M1','M5','M15','H1','H4','D1'."""
+    if not ensure_mt5():
+        return None
     try:
-        tr = json.load(open(EMAIL_TRACKER)) if EMAIL_TRACKER.exists() else {}
-        return tr.get(key) == today
-    except Exception:
+        tf_const = getattr(_mt5, f"TIMEFRAME_{timeframe}")
+        rates = _mt5.copy_rates_from_pos(pair, tf_const, 0, bars)
+        if rates is None or len(rates) == 0:
+            return None
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        df.set_index("time", inplace=True)
+        df = df.rename(columns={"tick_volume": "volume"})
+        return df[["open", "high", "low", "close", "volume"]]
+    except Exception as e:
+        log.debug(f"get_mt5_data({pair},{timeframe}) error: {e}")
+        return None
+
+# ── Indicators ─────────────────────────────────────────────────────────────────
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high, low, close = df["high"], df["low"], df["close"]
+    tr = pd.concat([(high - low),
+                    (high - close.shift()).abs(),
+                    (low  - close.shift()).abs()], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+def adx(df: pd.DataFrame, period: int = 14) -> float:
+    if len(df) < period * 2:
+        return 0.0
+    high, low, close = df["high"], df["low"], df["close"]
+    plus_dm  = high.diff().clip(lower=0)
+    minus_dm = (-low.diff()).clip(lower=0)
+    tr = pd.concat([(high - low),
+                    (high - close.shift()).abs(),
+                    (low  - close.shift()).abs()], axis=1).max(axis=1)
+    atr_v = tr.rolling(period).mean()
+    plus_di  = 100 * (plus_dm.rolling(period).mean() / (atr_v + 1e-9))
+    minus_di = 100 * (minus_dm.rolling(period).mean() / (atr_v + 1e-9))
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+    return float(dx.rolling(period).mean().iloc[-1])
+
+def bollinger_width(df: pd.DataFrame, period: int = 20) -> float:
+    sma = df["close"].rolling(period).mean()
+    std = df["close"].rolling(period).std()
+    upper, lower = sma + 2 * std, sma - 2 * std
+    width = ((upper - lower) / (sma + 1e-9))
+    return float(width.iloc[-1])
+
+def ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False).mean()
+
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain  = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
+    loss  = (-delta.clip(upper=0)).ewm(span=period, adjust=False).mean()
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
+
+# ── Market condition classifier ────────────────────────────────────────────────
+def classify_market(pair: str) -> Dict:
+    """Reads M5/H1/H4 from MT5 and classifies market condition."""
+    m5 = get_mt5_data(pair, "M5", 500)
+    h1 = get_mt5_data(pair, "H1", 200)
+    if m5 is None or h1 is None or len(m5) < 100 or len(h1) < 50:
+        return {"condition": "UNCLEAR", "behavior": "skip", "confidence": 0}
+
+    try:
+        atr_series = atr(m5, 14)
+        atr_now = float(atr_series.iloc[-1])
+        atr_avg = float(atr_series.rolling(50).mean().iloc[-1])
+        if not atr_avg or atr_avg == 0:
+            return {"condition": "UNCLEAR", "behavior": "skip", "confidence": 0}
+        adx_now = adx(h1, 14)
+        bb_now  = bollinger_width(m5, 20)
+        bb_avg  = float(((m5["high"].rolling(20).max() - m5["low"].rolling(20).min())
+                         / (m5["close"].rolling(20).mean() + 1e-9)).rolling(50).mean().iloc[-1])
+
+        # VOLATILE / news (skip)
+        if atr_now > atr_avg * 2.5:
+            return {"condition": "VOLATILE", "confidence": 0.30, "behavior": "skip"}
+        # LOW liquidity (skip)
+        if atr_now < atr_avg * 0.5:
+            return {"condition": "LOW_LIQUIDITY", "confidence": 0.20, "behavior": "skip"}
+        # STRONG TREND
+        if adx_now > 40:
+            return {"condition": "STRONG_TREND", "confidence": min(adx_now/60, 1.0),
+                    "behavior": "full_runner", "tp_mult": 8.0, "sl_mult": 0.4,
+                    "partial_1": 0.0, "partial_2": 0.0, "runner": 1.0, "max_hold": "multi_session"}
+        # TRENDING
+        if adx_now > 25 and atr_now > atr_avg:
+            return {"condition": "TRENDING", "confidence": min(adx_now/50, 1.0),
+                    "behavior": "runner_mode", "tp_mult": 4.0, "sl_mult": 0.5,
+                    "partial_1": 0.20, "partial_2": 0.20, "runner": 0.60, "max_hold": "swing"}
+        # COMPRESSION (squeeze before breakout)
+        if bb_avg and bb_now < bb_avg * 0.7:
+            return {"condition": "COMPRESSION", "confidence": 0.70,
+                    "behavior": "breakout_ready", "tp_mult": 5.0, "sl_mult": 0.3,
+                    "partial_1": 0.25, "partial_2": 0.25, "runner": 0.50, "max_hold": "swing"}
+        # EXPANSION
+        if atr_now > atr_avg * 1.5:
+            return {"condition": "EXPANSION", "confidence": min(atr_now/(atr_avg*2), 1.0),
+                    "behavior": "momentum_capture", "tp_mult": 6.0, "sl_mult": 0.6,
+                    "partial_1": 0.10, "partial_2": 0.20, "runner": 0.70, "max_hold": "swing"}
+        # RANGING
+        if adx_now < 20 and bb_avg and bb_now < bb_avg:
+            return {"condition": "RANGING", "confidence": 1 - (adx_now/20),
+                    "behavior": "mean_reversion", "tp_mult": 1.5, "sl_mult": 0.8,
+                    "partial_1": 0.50, "partial_2": 0.30, "runner": 0.20, "max_hold": "session"}
+        return {"condition": "UNCLEAR", "behavior": "skip", "confidence": 0}
+    except Exception as e:
+        log.debug(f"classify_market({pair}) error: {e}")
+        return {"condition": "UNCLEAR", "behavior": "skip", "confidence": 0}
+
+# ── H4 bias ────────────────────────────────────────────────────────────────────
+def get_h4_bias(pair: str) -> Optional[str]:
+    """Returns 'buy', 'sell' or None based on H4 EMA 50/200."""
+    h4 = get_mt5_data(pair, "H4", 250)
+    if h4 is None or len(h4) < 210:
+        return None
+    e50  = ema(h4["close"], 50).iloc[-1]
+    e200 = ema(h4["close"], 200).iloc[-1]
+    last = h4["close"].iloc[-1]
+    if last > e50 > e200: return "buy"
+    if last < e50 < e200: return "sell"
+    return None
+
+# ── Entry signals ──────────────────────────────────────────────────────────────
+def detect_liquidity_sweep(m5: pd.DataFrame) -> Optional[Dict]:
+    """Sweep of recent high/low with rejection wick."""
+    if len(m5) < 30:
+        return None
+    last = m5.iloc[-1]
+    prev = m5.iloc[-30:-1]
+    body = abs(last["close"] - last["open"])
+    upper_wick = last["high"] - max(last["open"], last["close"])
+    lower_wick = min(last["open"], last["close"]) - last["low"]
+    # Bullish sweep: swept previous low, closed above, big lower wick
+    if last["low"] < prev["low"].min() and last["close"] > last["open"] and lower_wick > body * 1.5:
+        return {"direction": "buy"}
+    # Bearish sweep
+    if last["high"] > prev["high"].max() and last["close"] < last["open"] and upper_wick > body * 1.5:
+        return {"direction": "sell"}
+    return None
+
+def detect_fvg(m5: pd.DataFrame) -> Optional[Dict]:
+    """3-bar Fair Value Gap detected in last 10 bars."""
+    if len(m5) < 12:
+        return None
+    for i in range(len(m5) - 10, len(m5) - 2):
+        b1, b2, b3 = m5.iloc[i], m5.iloc[i+1], m5.iloc[i+2]
+        # Bullish FVG: b3.low > b1.high
+        if b3["low"] > b1["high"] and b2["close"] > b2["open"]:
+            # Price in or just above gap
+            if m5["close"].iloc[-1] > b1["high"]:
+                return {"direction": "buy"}
+        # Bearish FVG
+        if b3["high"] < b1["low"] and b2["close"] < b2["open"]:
+            if m5["close"].iloc[-1] < b1["low"]:
+                return {"direction": "sell"}
+    return None
+
+def detect_bos(m5: pd.DataFrame) -> Optional[Dict]:
+    """Break of structure: latest close beyond recent swing high/low."""
+    if len(m5) < 30:
+        return None
+    recent = m5.iloc[-30:-2]
+    last_close = m5["close"].iloc[-1]
+    if last_close > recent["high"].max():
+        return {"direction": "buy"}
+    if last_close < recent["low"].min():
+        return {"direction": "sell"}
+    return None
+
+def detect_momentum(m5: pd.DataFrame) -> Dict:
+    """Strong directional momentum on M5."""
+    if len(m5) < 30:
+        return {"strong": False, "direction": None}
+    close = m5["close"]
+    e8, e21 = ema(close, 8).iloc[-1], ema(close, 21).iloc[-1]
+    r = rsi(close, 14).iloc[-1]
+    last_5 = close.iloc[-5:]
+    pct_move = (last_5.iloc[-1] - last_5.iloc[0]) / last_5.iloc[0]
+    if e8 > e21 and r > 55 and pct_move > 0.0015:
+        return {"strong": True, "direction": "buy"}
+    if e8 < e21 and r < 45 and pct_move < -0.0015:
+        return {"strong": True, "direction": "sell"}
+    return {"strong": False, "direction": None}
+
+def detect_breakout(m5: pd.DataFrame) -> Optional[Dict]:
+    """Compression breakout: close outside last 20-bar BB."""
+    if len(m5) < 25:
+        return None
+    sma = m5["close"].rolling(20).mean()
+    std = m5["close"].rolling(20).std()
+    upper, lower = sma.iloc[-1] + 2*std.iloc[-1], sma.iloc[-1] - 2*std.iloc[-1]
+    last = m5["close"].iloc[-1]
+    if last > upper:
+        return {"direction": "buy"}
+    if last < lower:
+        return {"direction": "sell"}
+    return None
+
+def find_entry(pair: str, condition: Dict, profile: Dict) -> Optional[Dict]:
+    """Confluence of 5 signal types; aligns with H4 bias."""
+    if condition.get("behavior") == "skip":
+        return None
+    m5 = get_mt5_data(pair, "M5", 200)
+    if m5 is None or len(m5) < 50:
+        return None
+    h4_bias = get_h4_bias(pair)
+    if h4_bias is None:
+        return None
+
+    signals = []
+    sweep = detect_liquidity_sweep(m5)
+    if sweep and sweep["direction"] == h4_bias:
+        signals.append({"type": "sweep", "strength": 0.80 * profile.get("sweep", 1.0)})
+    fvg = detect_fvg(m5)
+    if fvg and fvg["direction"] == h4_bias:
+        signals.append({"type": "fvg", "strength": 0.70 * profile.get("fvg", 1.0)})
+    bos = detect_bos(m5)
+    if bos and bos["direction"] == h4_bias:
+        signals.append({"type": "bos", "strength": 0.75 * profile.get("bos", 1.0)})
+    mom = detect_momentum(m5)
+    if mom["strong"] and mom["direction"] == h4_bias:
+        signals.append({"type": "momentum", "strength": 0.85 * profile.get("momentum", 1.0)})
+    if condition.get("condition") == "COMPRESSION":
+        br = detect_breakout(m5)
+        if br and br["direction"] == h4_bias:
+            signals.append({"type": "breakout", "strength": 0.90 * profile.get("breakout", 1.0)})
+
+    if not signals:
+        return None
+    confidence = sum(s["strength"] for s in signals) / len(signals)
+    confidence *= condition.get("confidence", 1.0)
+    if confidence < MIN_CONFIDENCE:
+        return None
+
+    return {
+        "pair": pair, "direction": h4_bias, "confidence": confidence,
+        "signals": [s["type"] for s in signals], "condition": condition.get("condition"),
+    }
+
+# ── SL / TP / lots ─────────────────────────────────────────────────────────────
+def avoid_round_number(price: float, pair: str) -> float:
+    """Move SL away from psychological round levels."""
+    if "JPY" in pair:
+        nearest = round(price * 10) / 10
+        if abs(price - nearest) < 0.02:
+            return price - 0.03 if price > nearest else price + 0.03
+    elif pair in ("XAUUSD",):
+        nearest = round(price)
+        if abs(price - nearest) < 0.30:
+            return price - 0.50 if price > nearest else price + 0.50
+    elif pair in ("BTCUSD",):
+        nearest = round(price / 100) * 100
+        if abs(price - nearest) < 30:
+            return price - 50 if price > nearest else price + 50
+    else:
+        nearest = round(price, 3)
+        if abs(price - nearest) < 0.0002:
+            return price - 0.0003 if price > nearest else price + 0.0003
+    return price
+
+def calculate_sl(pair: str, direction: str, condition: Dict) -> Optional[Tuple[float, float]]:
+    m5 = get_mt5_data(pair, "M5", 100)
+    if m5 is None or len(m5) < 30:
+        return None
+    atr_val = float(atr(m5, 14).iloc[-1])
+    sl_mult = condition.get("sl_mult", 0.5)
+
+    tick = _mt5.symbol_info_tick(pair) if _mt5 else None
+    if tick is None:
+        return None
+    entry = tick.ask if direction == "buy" else tick.bid
+
+    if direction == "buy":
+        swing_low = float(m5["low"].iloc[-20:].min())
+        sl = swing_low - atr_val * 0.2
+        sl = avoid_round_number(sl, pair)
+    else:
+        swing_high = float(m5["high"].iloc[-20:].max())
+        sl = swing_high + atr_val * 0.2
+        sl = avoid_round_number(sl, pair)
+
+    sl_distance = abs(entry - sl)
+    if sl_distance < atr_val * 0.4:
+        sl_distance = atr_val * 0.4
+        sl = entry - sl_distance if direction == "buy" else entry + sl_distance
+    if sl_distance > atr_val * sl_mult * 3:
+        return None
+    return sl, sl_distance
+
+def calculate_tp(entry: float, sl_dist: float, direction: str, condition: Dict) -> float:
+    tp_mult = condition.get("tp_mult", 3.0)
+    if direction == "buy":
+        return entry + sl_dist * tp_mult
+    return entry - sl_dist * tp_mult
+
+def calculate_lots(pair: str, sl_distance: float, balance: float) -> float:
+    risk_amount = balance * MAX_RISK_PER_TRADE
+    pip_val = PIP_VALUE.get(pair, 10.0)
+    # For non-FX, sl_distance is already in price units worth pip_val per unit
+    if pair in ("BTCUSD", "ETHUSD", "NAS100", "US30"):
+        lots = risk_amount / max(sl_distance * pip_val, 0.01)
+    elif "JPY" in pair:
+        pips = sl_distance * 100
+        lots = risk_amount / max(pips * pip_val, 0.01)
+    elif pair in ("XAUUSD", "XAGUSD"):
+        lots = risk_amount / max(sl_distance * pip_val, 0.01)
+    else:
+        pips = sl_distance * 10000
+        lots = risk_amount / max(pips * pip_val, 0.01)
+    return max(0.01, min(round(lots, 2), 1.0))
+
+# ── Correlation / daily limit ──────────────────────────────────────────────────
+def check_correlation(pair: str) -> bool:
+    if not ensure_mt5(): return True
+    positions = _mt5.positions_get() or []
+    for group, members in CORRELATION_GROUPS.items():
+        if pair in members:
+            existing = [p for p in positions if p.symbol in members]
+            if len(existing) >= MAX_CORRELATED:
+                return False
+    return True
+
+def _load_daily_pnl() -> dict:
+    try:
+        if DAILY_PNL_FILE.exists():
+            return json.load(open(DAILY_PNL_FILE))
+    except Exception: pass
+    return {}
+
+def _save_daily_pnl(d: dict):
+    try: json.dump(d, open(DAILY_PNL_FILE, "w"), indent=2)
+    except Exception: pass
+
+def check_daily_limit() -> bool:
+    if not ensure_mt5(): return True
+    info = _mt5.account_info()
+    if info is None: return True
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    d = _load_daily_pnl()
+    if today not in d:
+        d[today] = {"start_balance": info.balance, "paused": False}
+        _save_daily_pnl(d)
+    start = d[today]["start_balance"]
+    loss_pct = (start - info.balance) / start if start > 0 else 0
+    if loss_pct >= MAX_DAILY_LOSS:
+        if not d[today].get("paused"):
+            send_telegram(f"⛔ DAILY LIMIT HIT — {loss_pct:.1%} loss\nTrading paused for today")
+            d[today]["paused"] = True
+            _save_daily_pnl(d)
+        return False
+    return not d[today].get("paused", False)
+
+# ── Session filter ─────────────────────────────────────────────────────────────
+def in_session() -> bool:
+    """London 07-10 UTC + NY 13-16 UTC."""
+    h = datetime.now(timezone.utc).hour
+    return (7 <= h <= 10) or (13 <= h <= 16)
+
+# ── Pair profiles (learning) ───────────────────────────────────────────────────
+def _load_profiles() -> dict:
+    try:
+        if PAIR_PROFILES.exists():
+            return json.load(open(PAIR_PROFILES))
+    except Exception: pass
+    return {}
+
+def _save_profiles(d: dict):
+    try: json.dump(d, open(PAIR_PROFILES, "w"), indent=2)
+    except Exception: pass
+
+def get_profile(pair: str) -> dict:
+    profiles = _load_profiles()
+    return profiles.get(pair, {"sweep":1.0,"fvg":1.0,"bos":1.0,"momentum":1.0,"breakout":1.0,
+                                "trades":0,"wins":0,"total_r":0.0})
+
+def update_profile(pair: str, signals: List[str], won: bool, realized_r: float):
+    profiles = _load_profiles()
+    p = profiles.get(pair, {"sweep":1.0,"fvg":1.0,"bos":1.0,"momentum":1.0,"breakout":1.0,
+                            "trades":0,"wins":0,"total_r":0.0})
+    p["trades"] = p.get("trades", 0) + 1
+    if won: p["wins"] = p.get("wins", 0) + 1
+    p["total_r"] = p.get("total_r", 0.0) + realized_r
+    # Reward / punish signals
+    delta = 0.05 if won else -0.05
+    for s in signals:
+        cur = p.get(s, 1.0)
+        p[s] = max(0.3, min(1.5, cur + delta))
+    profiles[pair] = p
+    _save_profiles(profiles)
+
+# ── Trade tags (partial exits done) ────────────────────────────────────────────
+def _load_tags() -> dict:
+    try:
+        if TRADE_TAGS.exists(): return json.load(open(TRADE_TAGS))
+    except Exception: pass
+    return {}
+
+def _save_tags(d: dict):
+    try: json.dump(d, open(TRADE_TAGS, "w"), indent=2)
+    except Exception: pass
+
+def tag(ticket: int, key: str) -> bool:
+    d = _load_tags()
+    return key in d.get(str(ticket), [])
+
+def tag_set(ticket: int, key: str):
+    d = _load_tags()
+    s = d.get(str(ticket), [])
+    if key not in s:
+        s.append(key); d[str(ticket)] = s; _save_tags(d)
+
+# ── Order execution ────────────────────────────────────────────────────────────
+def place_trade(pair: str, direction: str, sl: float, tp: float, lots: float) -> Optional[object]:
+    if not ensure_mt5(): return None
+    try:
+        info = _mt5.symbol_info(pair)
+        if info is None:
+            log.warning(f"symbol_info None for {pair}")
+            return None
+        if not info.visible:
+            _mt5.symbol_select(pair, True)
+        tick = _mt5.symbol_info_tick(pair)
+        if tick is None: return None
+        price = tick.ask if direction == "buy" else tick.bid
+        order_type = _mt5.ORDER_TYPE_BUY if direction == "buy" else _mt5.ORDER_TYPE_SELL
+        request = {
+            "action": _mt5.TRADE_ACTION_DEAL, "symbol": pair, "volume": float(lots),
+            "type": order_type, "price": price, "sl": float(sl), "tp": float(tp),
+            "deviation": 20, "magic": 234000, "comment": "OMEGA_ADAPTIVE",
+            "type_time": _mt5.ORDER_TIME_GTC, "type_filling": _mt5.ORDER_FILLING_IOC,
+        }
+        result = _mt5.order_send(request)
+        if result is None:
+            log.warning(f"order_send returned None for {pair}")
+            return None
+        if result.retcode != _mt5.TRADE_RETCODE_DONE:
+            # Try FOK if IOC rejected
+            request["type_filling"] = _mt5.ORDER_FILLING_FOK
+            result = _mt5.order_send(request)
+        return result
+    except Exception as e:
+        log.warning(f"place_trade error {pair}: {e}")
+        return None
+
+def close_partial(position, pct: float) -> bool:
+    if not ensure_mt5(): return False
+    try:
+        vol = round(position.volume * pct, 2)
+        if vol < 0.01: return False
+        opp_type = _mt5.ORDER_TYPE_SELL if position.type == _mt5.ORDER_TYPE_BUY else _mt5.ORDER_TYPE_BUY
+        tick = _mt5.symbol_info_tick(position.symbol)
+        price = tick.bid if position.type == _mt5.ORDER_TYPE_BUY else tick.ask
+        request = {
+            "action": _mt5.TRADE_ACTION_DEAL, "position": position.ticket,
+            "symbol": position.symbol, "volume": vol, "type": opp_type, "price": price,
+            "deviation": 20, "magic": 234000, "comment": "OMEGA_PARTIAL",
+            "type_filling": _mt5.ORDER_FILLING_IOC,
+        }
+        result = _mt5.order_send(request)
+        return result is not None and result.retcode == _mt5.TRADE_RETCODE_DONE
+    except Exception as e:
+        log.warning(f"close_partial error: {e}")
         return False
 
+def modify_sl(position, new_sl: float) -> bool:
+    if not ensure_mt5(): return False
+    try:
+        request = {
+            "action": _mt5.TRADE_ACTION_SLTP, "position": position.ticket,
+            "symbol": position.symbol, "sl": float(new_sl), "tp": float(position.tp),
+        }
+        result = _mt5.order_send(request)
+        return result is not None and result.retcode == _mt5.TRADE_RETCODE_DONE
+    except Exception as e:
+        log.warning(f"modify_sl error: {e}")
+        return False
+
+def close_position(position) -> bool:
+    return close_partial(position, 1.0)
+
+# ── Exit management ────────────────────────────────────────────────────────────
+def manage_position(position):
+    """Run partial exits + trailing stops based on the condition tagged at entry."""
+    try:
+        tick = _mt5.symbol_info_tick(position.symbol)
+        if tick is None: return
+        entry = position.price_open
+        sl    = position.sl
+        if sl == 0: return
+        sl_dist = abs(entry - sl)
+        if sl_dist == 0: return
+        current = tick.bid if position.type == _mt5.ORDER_TYPE_BUY else tick.ask
+        if position.type == _mt5.ORDER_TYPE_BUY:
+            profit_r = (current - entry) / sl_dist
+        else:
+            profit_r = (entry - current) / sl_dist
+
+        # Re-read condition (recompute if needed; default to TRENDING profile)
+        cond = classify_market(position.symbol)
+        p1 = cond.get("partial_1", 0.25)
+        p2 = cond.get("partial_2", 0.25)
+        behavior = cond.get("behavior", "runner_mode")
+
+        # PARTIAL 1 at 1.5R
+        if profit_r >= 1.5 and not tag(position.ticket, "p1") and p1 > 0:
+            if close_partial(position, p1):
+                modify_sl(position, entry)  # BE
+                tag_set(position.ticket, "p1")
+                send_telegram(
+                    f"✅ PARTIAL 1 — {position.symbol}\n"
+                    f"Closed {int(p1*100)}% at 1.5R | SL→BE\n"
+                    f"PnL: ${position.profit:.2f}")
+
+        # PARTIAL 2 at 2.5R
+        if profit_r >= 2.5 and not tag(position.ticket, "p2") and p2 > 0:
+            if close_partial(position, p2):
+                # trailing: 1 ATR behind
+                m5 = get_mt5_data(position.symbol, "M5", 60)
+                if m5 is not None:
+                    atr_v = float(atr(m5, 14).iloc[-1])
+                    new_sl = current - atr_v if position.type == _mt5.ORDER_TYPE_BUY else current + atr_v
+                    modify_sl(position, new_sl)
+                tag_set(position.ticket, "p2")
+                send_telegram(
+                    f"✅ PARTIAL 2 — {position.symbol}\n"
+                    f"Closed {int(p2*100)}% at 2.5R | Trailing ON\n"
+                    f"PnL: ${position.profit:.2f}")
+
+        # Full runner: at 1R move BE, at 3R trail 2ATR
+        if behavior == "full_runner":
+            if profit_r >= 1.0 and not tag(position.ticket, "be"):
+                modify_sl(position, entry); tag_set(position.ticket, "be")
+            if profit_r >= 3.0:
+                m5 = get_mt5_data(position.symbol, "M5", 60)
+                if m5 is not None:
+                    atr_v = float(atr(m5, 14).iloc[-1])
+                    new_sl = current - 2*atr_v if position.type == _mt5.ORDER_TYPE_BUY else current + 2*atr_v
+                    if (position.type == _mt5.ORDER_TYPE_BUY and new_sl > position.sl) or \
+                       (position.type == _mt5.ORDER_TYPE_SELL and new_sl < position.sl):
+                        modify_sl(position, new_sl)
+
+        # Runner trail update after p2
+        if profit_r >= 2.5 and tag(position.ticket, "p2"):
+            m5 = get_mt5_data(position.symbol, "M5", 60)
+            if m5 is not None:
+                atr_v = float(atr(m5, 14).iloc[-1])
+                new_sl = current - 1.5*atr_v if position.type == _mt5.ORDER_TYPE_BUY else current + 1.5*atr_v
+                if (position.type == _mt5.ORDER_TYPE_BUY and new_sl > position.sl) or \
+                   (position.type == _mt5.ORDER_TYPE_SELL and new_sl < position.sl):
+                    modify_sl(position, new_sl)
+
+    except Exception as e:
+        log.debug(f"manage_position error: {e}")
+
+# ── Position monitor thread ────────────────────────────────────────────────────
+_closed_tickets: set = set()
+
+def monitor_positions_loop():
+    """Background: run exit management every 30s + report closes."""
+    while True:
+        try:
+            if ensure_mt5():
+                positions = _mt5.positions_get() or []
+                open_tickets = {p.ticket for p in positions}
+                for pos in positions:
+                    if pos.magic == 234000:
+                        manage_position(pos)
+                # Detect closed trades
+                history_from = datetime.now(timezone.utc) - timedelta(hours=24)
+                deals = _mt5.history_deals_get(history_from, datetime.now(timezone.utc)) or []
+                for d in deals:
+                    if d.magic != 234000: continue
+                    if d.entry != _mt5.DEAL_ENTRY_OUT: continue
+                    if d.position_id in _closed_tickets: continue
+                    if d.position_id in open_tickets: continue
+                    _closed_tickets.add(d.position_id)
+                    # Compute realized R from related deals
+                    related = [x for x in deals if x.position_id == d.position_id]
+                    pnl = sum(x.profit for x in related)
+                    won = pnl > 0
+                    # Approximate realized R: pnl / risk
+                    info = _mt5.account_info()
+                    risk = (info.balance if info else 5000) * MAX_RISK_PER_TRADE
+                    rr = pnl / risk if risk > 0 else 0
+                    log.info(f"Position {d.position_id} closed: pnl={pnl:.2f} R={rr:.2f}")
+                    send_telegram(
+                        f"{'🟢 WIN' if won else '🔴 LOSS'} {d.symbol}\n"
+                        f"PnL: ${pnl:+.2f} | R: {rr:+.2f}\n"
+                        f"Balance: ${info.balance if info else 0:.2f}")
+                    # Learning update (we don't have signals here; best-effort)
+                    update_profile(d.symbol, [], won, rr)
+                    send_balance_update()
+        except Exception as e:
+            log.debug(f"monitor_positions error: {e}")
+        time.sleep(30)
+
+# ── Progress tracker ───────────────────────────────────────────────────────────
+_target_hit_sent = False
+
+def send_balance_update():
+    global _target_hit_sent
+    if not ensure_mt5(): return
+    info = _mt5.account_info()
+    if info is None: return
+    balance = info.balance
+    progress = ((balance - START_BALANCE_BASE) / START_BALANCE_BASE) * 100
+    remaining = max(0, START_BALANCE_TARGET - balance)
+    send_telegram(
+        f"💰 BALANCE UPDATE\n"
+        f"Balance: ${balance:.2f}\n"
+        f"Target: ${START_BALANCE_TARGET:.0f}\n"
+        f"Progress: {progress:.2f}% | Remaining: ${remaining:.2f}\n"
+        f"{'🎯 TARGET HIT!' if balance>=START_BALANCE_TARGET else 'Keep going...'}")
+    if balance >= START_BALANCE_TARGET and not _target_hit_sent:
+        _target_hit_sent = True
+        send_telegram(
+            "🏆 10% TARGET ACHIEVED\n"
+            f"Balance: ${balance:.2f}\n"
+            "System proven on demo.\n"
+            "Ready for FTMO challenge.\n"
+            "Awaiting your instruction.")
+
+# ── State persistence ──────────────────────────────────────────────────────────
+def load_state() -> dict:
+    try:
+        if STATE_FILE.exists(): return json.load(open(STATE_FILE))
+    except Exception: pass
+    return {"iteration": 0, "best_wr": {}, "best_expectancy": {},
+            "best_params": {}, "best_score": {}}
+
+def save_state(state: dict):
+    try: json.dump(state, open(STATE_FILE, "w"), indent=2)
+    except Exception as e: log.debug(f"save_state error: {e}")
+
+# ── Email scheduling ───────────────────────────────────────────────────────────
+def _load_tracker() -> dict:
+    try:
+        if EMAIL_TRACKER.exists(): return json.load(open(EMAIL_TRACKER))
+    except Exception: pass
+    return {}
 
 def _mark_email(key: str):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    d = _load_tracker(); d[key] = datetime.utcnow().isoformat()
+    try: json.dump(d, open(EMAIL_TRACKER, "w"), indent=2)
+    except Exception: pass
+
+def _email_sent_today(key: str) -> bool:
+    d = _load_tracker()
+    if key not in d: return False
     try:
-        tr = json.load(open(EMAIL_TRACKER)) if EMAIL_TRACKER.exists() else {}
-        tr[key] = today
-        json.dump(tr, open(EMAIL_TRACKER, "w"))
-    except Exception:
-        pass
+        last = datetime.fromisoformat(d[key])
+        return last.date() == datetime.utcnow().date()
+    except Exception: return False
 
-
-def send_email(subject: str, body: str, key: str = "") -> bool:
+def send_email(subject: str, html: str) -> bool:
     if not EMAIL_FROM or not EMAIL_PASS or not EMAIL_TO:
-        return False
-    k = key or subject[:40]
-    if _email_sent_today(k):
         return False
     try:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = EMAIL_FROM
-        msg["To"]      = EMAIL_TO
-        msg.attach(MIMEText(body, "html"))
+        msg["Subject"] = subject; msg["From"] = EMAIL_FROM; msg["To"] = EMAIL_TO
+        msg.attach(MIMEText(html, "html"))
         ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30, context=ctx) as s:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=30) as s:
             s.login(EMAIL_FROM, EMAIL_PASS)
-            s.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-        _mark_email(k)
-        log.info(f"Email sent: {subject}")
+            s.send_message(msg)
         return True
     except Exception as e:
-        log.debug(f"Email failed: {e}")
+        log.debug(f"email error: {e}")
         return False
 
-
-# ── Git sync ───────────────────────────────────────────────────────────────────
+# ── Git push ───────────────────────────────────────────────────────────────────
 def git_push(iteration: int, note: str = "") -> bool:
-    if not GH_TOKEN:
-        return False
+    if not GH_TOKEN: return False
     try:
         cwd = str(ROOT)
         subprocess.run(["git", "add", "-A"], cwd=cwd, capture_output=True, timeout=30)
@@ -596,464 +854,397 @@ def git_push(iteration: int, note: str = "") -> bool:
         subprocess.run(["git", "commit", "-m", msg], cwd=cwd, capture_output=True, timeout=30)
         remote = f"https://{GH_TOKEN}@github.com/{GH_USER}/{GH_REPO}.git"
         for branch in ["master", "main"]:
-            r = subprocess.run(
-                ["git", "push", remote, f"HEAD:{branch}"],
-                cwd=cwd, capture_output=True, timeout=60)
-            if r.returncode == 0:
-                log.info(f"Git push: {msg}")
-                return True
-        log.debug("Git push failed both branches")
+            r = subprocess.run(["git", "push", remote, f"HEAD:{branch}"],
+                               cwd=cwd, capture_output=True, timeout=60)
+            if r.returncode == 0: return True
         return False
-    except Exception as e:
-        log.debug(f"Git push error: {e}")
-        return False
+    except Exception: return False
 
-
-# ── RAM check ──────────────────────────────────────────────────────────────────
+# ── RAM ────────────────────────────────────────────────────────────────────────
 def get_ram_pct() -> float:
     try:
         import psutil
         return psutil.virtual_memory().percent
-    except ImportError:
-        return 0.0
+    except ImportError: return 0.0
 
+# ── Evolution (background) ─────────────────────────────────────────────────────
+_evolution_iter = 0
+_global_best_score: Dict[str, float] = {}
 
-# ── AutoTrader ─────────────────────────────────────────────────────────────────
-class AutoTrader:
-
-    def __init__(self):
-        self.iteration      : int              = 0
-        self.best_wr        : Dict[str, float] = {}
-        self.best_expectancy: Dict[str, float] = {}
-        self.best_score     : Dict[str, float] = {}
-        self.best_params    : Dict[str, dict]  = {}
-        self.no_improve     : Dict[str, int]   = {}
-        self.current_params : Dict[str, dict]  = {}
-        self.running        : bool             = True
-        self._last_trade_check = 0.0
-        self._last_hour_log    = 0.0
-        self._open_trades: List[dict] = []
-
-        self.load_state()
-        connect_mt5()
-        log.info("=" * 55)
-        log.info("AutoTrader OMEGA v3.0 — Clean Rebuild")
-        log.info(f"Pairs: {len(PAIRS)} | State: iter {self.iteration}")
-        log.info("=" * 55)
-
-    # ── Main loop ──────────────────────────────────────────────────────────────
-    def run_forever(self):
-        send_telegram(
-            f"🚀 AutoTrader OMEGA v3.0 STARTED\n"
-            f"Pairs: {len(PAIRS)} | iter: {self.iteration}\n"
-            f"MT5: {'Connected' if _mt5_connected else 'Offline (retry every 60s)'}\n"
-            f"Target: 60-75% WR | 2.0-5.0 RRR | Max DD 8%\n"
-            f"Use /status /pause /resume /stop /report"
-        )
-        while self.running:
-            try:
-                self.evolve()
-                self.iteration += 1
-                self.save_state()
-
-                if self.iteration % 10 == 0:
-                    git_push(self.iteration)
-
-                if self.iteration % 50 == 0:
-                    self.send_telegram_report()
-
-                # Hourly MT5 connection log
-                if time.time() - self._last_hour_log > 3600:
-                    self._log_hourly()
-
-                # Check for live paper trades every 4 hours
-                if time.time() - self._last_trade_check > 4 * 3600:
-                    self.check_and_trade()
-                    self._last_trade_check = time.time()
-
-                # Scheduled emails
-                self.send_email_if_scheduled()
-
-                # Resource guard
-                self.check_resources()
-
-            except KeyboardInterrupt:
-                log.info("Ctrl+C — stopping gracefully")
-                self.save_state()
-                send_telegram("🛑 AutoTrader stopped by keyboard interrupt.")
-                break
-            except Exception as e:
-                log.error(f"Main loop error: {e}", exc_info=True)
-                time.sleep(30)
-                continue  # NEVER STOP
-
-    # ── Evolution ─────────────────────────────────────────────────────────────
-    def evolve(self):
-        for pair in PAIRS:
-            try:
-                data = get_data(pair)
-                if data is None:
-                    continue
-
-                params = self.mutate(pair)
-                result = run_backtest(data, pair, params)
-                if result is None:
-                    continue
-
-                if self.is_better(pair, result):
-                    self.accept(pair, params, result)
-                    wr  = result["wr"]
-                    exp = wr * result["avg_win"] - (1 - wr) * result["avg_loss"]
-                    log.info(
-                        f"✅ KEPT [{pair}] WR={wr:.1%} RRR={result['avg_rrr']:.2f} "
-                        f"E={exp:.3f} PF={result['pf']:.2f} DD={result['dd']:.1%} "
-                        f"trades={result['trades']}"
-                    )
-                else:
-                    self.no_improve[pair] = self.no_improve.get(pair, 0) + 1
-                    ni = self.no_improve[pair]
-                    if ni == 50:
-                        self._random_restart(pair)
-                    elif ni == 100:
-                        self._new_strategy(pair)
-
-                gc.collect()
-
-            except Exception as e:
-                log.warning(f"[{pair}] evolve error: {e}")
-                continue  # skip pair, never stop
-
-    # ── Acceptance ────────────────────────────────────────────────────────────
-    def is_better(self, pair: str, result: dict) -> bool:
-        wr      = result.get("wr",       0)
-        avg_win = result.get("avg_win",  0)
-        avg_loss= result.get("avg_loss", 1)
-        pf      = result.get("pf",       0)
-        dd      = result.get("dd",       1)
-        trades  = result.get("trades",   0)
-
-        if trades < 8:
-            return False
-
-        # WR realistic band: 55% – 78%
-        if wr < 0.55 or wr > 0.78:
-            return False
-
-        # Profit Factor
-        if pf > 0 and pf < 1.3:
-            return False
-
-        # Max drawdown 8%
-        if dd > 0.08:
-            return False
-
-        # Positive expectancy
-        exp = wr * avg_win - (1 - wr) * avg_loss
-        if exp <= 0:
-            return False
-
-        # Must beat current best expectancy
-        best_e = self.best_expectancy.get(pair, -999)
-        if exp <= best_e:
-            return False
-
-        # RRR floor
-        rrr = result.get("avg_rrr", 0)
-        if rrr < 1.5:
-            return False
-
-        return True
-
-    def accept(self, pair: str, params: dict, result: dict):
-        wr      = result["wr"]
-        avg_win = result["avg_win"]
-        avg_loss= result["avg_loss"]
-        exp     = wr * avg_win - (1 - wr) * avg_loss
-
-        self.best_wr[pair]         = max(self.best_wr.get(pair, 0), wr)
-        self.best_expectancy[pair] = exp
-        self.best_score[pair]      = exp + result["avg_rrr"] * 0.05
-        self.best_params[pair]     = copy.deepcopy(params)
-        self.current_params[pair]  = copy.deepcopy(params)
-        self.no_improve[pair]      = 0
-
-    # ── Mutation ──────────────────────────────────────────────────────────────
-    def mutate(self, pair: str) -> dict:
-        base = copy.deepcopy(
-            self.current_params.get(pair) or self.best_params.get(pair) or
-            self.default_params())
-        # Mutate 1-3 parameters
-        n_muts = random.choice([1, 1, 2, 3])
-        for _ in range(n_muts):
-            param   = random.choice(PARAM_PRIORITIES[:10])
-            choices = PARAM_RANGES.get(param, [])
-            if choices:
-                base[param] = random.choice(choices)
-        base["version"] = base.get("version", 1) + 1
-        return base
-
-    def default_params(self) -> dict:
-        return {
-            "ema_fast": 21, "ema_slow": 89, "rsi_period": 14,
-            "rsi_long_max": 65, "rsi_short_min": 35, "atr_period": 14,
-            "sl_atr_mult": 0.5, "tp_rrr": 3.0, "trail_atr_mult": 1.5,
-            "partial1_r": 1.5, "partial2_r": 2.5,
-            "min_adx": 25, "use_adx": True, "use_ema_stack": True,
-            "min_confluence": 3, "version": 1,
-        }
-
-    def _random_restart(self, pair: str):
-        log.info(f"[{pair}] Random restart after 50 no-improve iters")
-        base = self.default_params()
-        for _ in range(random.randint(4, 8)):
-            p = random.choice(PARAM_PRIORITIES[:10])
-            c = PARAM_RANGES.get(p, [])
-            if c:
-                base[p] = random.choice(c)
-        self.current_params[pair] = base
-        self.no_improve[pair] = 0
-        send_telegram(f"🔄 [{pair}] Random restart — exploring new region.")
-
-    def _new_strategy(self, pair: str):
-        log.info(f"[{pair}] New strategy type after 100 no-improve iters")
-        templates = [
-            {"tp_rrr": 5.0, "sl_atr_mult": 0.4, "trail_atr_mult": 2.0,
-             "partial1_r": 2.0, "partial2_r": 3.0, "min_confluence": 3},
-            {"tp_rrr": 3.0, "sl_atr_mult": 0.6, "trail_atr_mult": 1.5,
-             "partial1_r": 1.5, "partial2_r": 2.5, "min_confluence": 4},
-            {"tp_rrr": 4.0, "sl_atr_mult": 0.5, "trail_atr_mult": 2.0,
-             "use_ema_stack": False, "use_adx": True, "min_confluence": 3},
-        ]
-        new = self.default_params()
-        new.update(random.choice(templates))
-        self.current_params[pair] = new
-        self.no_improve[pair] = 0
-        send_telegram(f"♻️ [{pair}] New strategy type — 100-iter plateau.")
-
-    # ── State persistence ──────────────────────────────────────────────────────
-    def save_state(self):
+def evolution_loop():
+    """Background micro-evolution: tune signal weights based on observed pair perf."""
+    global _evolution_iter
+    while True:
         try:
-            json.dump({
-                "iteration":       self.iteration,
-                "best_wr":         self.best_wr,
-                "best_expectancy": self.best_expectancy,
-                "best_score":      self.best_score,
-                "best_params":     self.best_params,
-                "no_improve":      self.no_improve,
-                "current_params":  self.current_params,
-                "saved":           datetime.now(timezone.utc).isoformat(),
-            }, open(STATE_FILE, "w"), indent=2)
-        except Exception as e:
-            log.error(f"State save failed: {e}")
-
-    def load_state(self):
-        try:
-            if STATE_FILE.exists():
-                s = json.load(open(STATE_FILE))
-                self.iteration       = s.get("iteration",       0)
-                self.best_wr         = s.get("best_wr",         {})
-                self.best_expectancy = s.get("best_expectancy", {})
-                self.best_score      = s.get("best_score",      {})
-                self.best_params     = s.get("best_params",     {})
-                self.no_improve      = s.get("no_improve",      {})
-                self.current_params  = s.get("current_params",  {})
-                log.info(f"State loaded: iter={self.iteration} | {len(self.best_params)} pairs with params")
-        except Exception as e:
-            log.warning(f"State load error: {e}")
-
-    # ── Telegram report ────────────────────────────────────────────────────────
-    def send_telegram_report(self):
-        try:
-            ram = get_ram_pct()
-            mt5_status = "Connected" if ensure_mt5() else "Offline"
-            lines = [f"=== AutoTrader iter {self.iteration:,} ==="]
-            top = sorted(self.best_expectancy.items(), key=lambda x: -x[1])[:6]
-            for pair, exp in top:
-                wr = self.best_wr.get(pair, 0)
-                lines.append(f"{pair}: WR={wr:.1%} E={exp:.3f}")
-            if not top:
-                lines.append("Evolving... No accepted pairs yet.")
-            lines.append(f"RAM: {ram:.0f}%")
-            lines.append(f"MT5: {mt5_status}")
-            lines.append("=" * 24)
-            send_telegram("\n".join(lines))
-        except Exception as e:
-            log.debug(f"Telegram report error: {e}")
-
-    # ── Scheduled email ────────────────────────────────────────────────────────
-    def send_email_if_scheduled(self):
-        try:
-            now_utc = datetime.now(timezone.utc)
-            h, m = now_utc.hour, now_utc.minute
-
-            # 08:00 UTC — evolution report
-            if h == 8 and m < 5 and not _email_sent_today("daily_evolution"):
-                top = sorted(self.best_expectancy.items(), key=lambda x: -x[1])[:8]
-                rows = "".join(
-                    f"<tr><td>{p}</td><td>{self.best_wr.get(p,0):.1%}</td>"
-                    f"<td>{e:.3f}R</td></tr>"
-                    for p, e in top)
-                html = (f"<h2>Evolution Report — {now_utc.strftime('%Y-%m-%d')}</h2>"
-                        f"<p>Iteration: {self.iteration:,}</p>"
-                        f"<table><tr><th>Pair</th><th>WR</th><th>Expectancy</th></tr>"
-                        f"{rows}</table>")
-                send_email("AutoTrader — Daily Evolution Report", html, "daily_evolution")
-
-            # 09:00 UTC — MT5 trade report
-            if h == 9 and m < 5 and not _email_sent_today("daily_trade"):
-                trades_html = "<p>Paper trades: see Telegram for live trade updates.</p>"
-                send_email("AutoTrader — Daily Trade Report", trades_html, "daily_trade")
-
-        except Exception as e:
-            log.debug(f"Email schedule error: {e}")
-
-    # ── Hourly log ─────────────────────────────────────────────────────────────
-    def _log_hourly(self):
-        self._last_hour_log = time.time()
-        ram = get_ram_pct()
-        mt5 = ensure_mt5()
-        top_pair = max(self.best_expectancy, key=self.best_expectancy.get) \
-                   if self.best_expectancy else "None"
-        top_exp  = self.best_expectancy.get(top_pair, 0)
-        log.info(
-            f"HOURLY | iter={self.iteration:,} | "
-            f"best={top_pair} E={top_exp:.3f} | "
-            f"RAM={ram:.0f}% | MT5={'ON' if mt5 else 'OFF'}"
-        )
-
-    # ── Resource guard ─────────────────────────────────────────────────────────
-    def check_resources(self):
-        try:
-            ram = get_ram_pct()
-            if ram > 92:
-                log.warning(f"HIGH RAM {ram:.0f}% — clearing cache")
-                send_telegram(f"⚠️ HIGH RAM {ram:.0f}% — clearing cache, pausing briefly")
-                _data_cache.clear()
-                gc.collect()
-                time.sleep(30)
-            elif ram > 85:
-                log.warning(f"RAM {ram:.0f}% — clearing data cache")
-                _data_cache.clear()
-                gc.collect()
-        except Exception:
-            pass
-
-    # ── MT5 paper trading ──────────────────────────────────────────────────────
-    def check_and_trade(self):
-        """Check current bar signals and place demo trades if conditions met."""
-        if not ensure_mt5():
-            return
-        try:
-            # Count current open trades
-            positions = _mt5.positions_get()
-            n_open = len(positions) if positions else 0
-            if n_open >= MAX_OPEN_TRADES:
-                return
-
-            # Check each pair with a known good strategy
+            # Light periodic recalibration — no heavy backtest here (live profiles drive it)
+            profiles = _load_profiles()
             for pair in PAIRS:
-                if n_open >= MAX_OPEN_TRADES:
-                    break
-                params = self.best_params.get(pair)
-                exp    = self.best_expectancy.get(pair, 0)
-                if params is None or exp <= 0:
-                    continue
-
-                # Get fresh data
-                data = get_data(pair)
-                if data is None or len(data) < 220:
-                    continue
-
-                # Check latest completed bar for signal
-                signals = generate_signals(data, params)
-                if not signals:
-                    continue
-
-                last_sig = signals[-1]
-                # Signal must be very recent (last 2 bars)
-                if len(data) - last_sig["idx"] > 2:
-                    continue
-
-                direction = last_sig["direction"]
-                atr       = last_sig["atr"]
-                sl_mult   = float(params.get("sl_atr_mult", 0.5))
-                tp_rrr    = float(params.get("tp_rrr", 3.0))
-
-                # Calculate lot size: 1% risk of account
-                acct = _mt5.account_info()
-                if acct is None:
-                    continue
-                balance   = acct.balance
-                risk_usd  = balance * RISK_PER_TRADE
-                sl_dist   = sl_mult * atr
-                lot_units = LOT_SIZE.get(pair, 100000)
-                lots      = round(risk_usd / (sl_dist * lot_units), 2)
-                lots      = max(0.01, min(lots, 0.50))
-
-                placed = self.place_demo_trade(pair, direction, sl_dist, tp_rrr * sl_dist, lots)
-                if placed:
-                    n_open += 1
-                    msg = (f"📈 PAPER TRADE [{pair}]\n"
-                           f"Direction: {direction.upper()}\n"
-                           f"Lots: {lots} | Risk: ${risk_usd:.0f}\n"
-                           f"SL: {sl_dist:.4f} | TP: {tp_rrr * sl_dist:.4f}\n"
-                           f"E={exp:.3f} | Account: ${balance:,.0f}")
-                    send_telegram(msg)
-                    log.info(f"Paper trade placed: {pair} {direction}")
-
+                p = profiles.get(pair)
+                if not p or p.get("trades", 0) < 10: continue
+                wr = p["wins"] / max(p["trades"], 1)
+                if wr < 0.50:
+                    # weaken all signals slightly
+                    for k in ("sweep","fvg","bos","momentum","breakout"):
+                        p[k] = max(0.3, p.get(k,1.0) - 0.01)
+                elif wr > 0.65:
+                    for k in ("sweep","fvg","bos","momentum","breakout"):
+                        p[k] = min(1.5, p.get(k,1.0) + 0.005)
+            _save_profiles(profiles)
+            _evolution_iter += 1
+            if _evolution_iter % 10 == 0:
+                git_push(_evolution_iter, "evolution")
+            gc.collect()
         except Exception as e:
-            log.warning(f"check_and_trade error: {e}")
+            log.debug(f"evolution_loop error: {e}")
+        time.sleep(600)  # every 10 min
 
-    def place_demo_trade(self, pair: str, direction: str,
-                         sl_dist: float, tp_dist: float, lots: float) -> bool:
-        """Place order on MT5 demo account."""
+# ── Scheduler ──────────────────────────────────────────────────────────────────
+def scheduler_loop():
+    while True:
         try:
-            symbol = MT5_SYMBOL_MAP.get(pair, pair)
-            tick   = _mt5.symbol_info_tick(symbol)
-            if tick is None:
-                log.warning(f"No tick data for {symbol}")
-                return False
-
-            if direction == "long":
-                price = tick.ask
-                sl    = round(price - sl_dist, 5)
-                tp    = round(price + tp_dist, 5)
-                order_type = _mt5.ORDER_TYPE_BUY
-            else:
-                price = tick.bid
-                sl    = round(price + sl_dist, 5)
-                tp    = round(price - tp_dist, 5)
-                order_type = _mt5.ORDER_TYPE_SELL
-
-            request = {
-                "action":      _mt5.TRADE_ACTION_DEAL,
-                "symbol":      symbol,
-                "volume":      lots,
-                "type":        order_type,
-                "price":       price,
-                "sl":          sl,
-                "tp":          tp,
-                "deviation":   20,
-                "magic":       234000,
-                "comment":     "AutoTrader OMEGA",
-                "type_time":   _mt5.ORDER_TIME_GTC,
-                "type_filling":_mt5.ORDER_FILLING_IOC,
-            }
-            result = _mt5.order_send(request)
-            if result is None:
-                log.warning(f"order_send returned None for {pair}")
-                return False
-            if result.retcode == _mt5.TRADE_RETCODE_DONE:
-                log.info(f"Trade placed: {pair} {direction} {lots} lots @{price:.5f}")
-                return True
-            else:
-                log.warning(f"Trade failed {pair}: {result.retcode} — {result.comment}")
-                return False
+            now = datetime.now(timezone.utc)
+            ram = get_ram_pct()
+            if ram > 88:
+                send_telegram(f"⚠️ HIGH RAM: {ram:.0f}%")
+            # Daily 08:00 UTC — evolution email
+            if now.hour == 8 and now.minute < 5 and not _email_sent_today("evolution"):
+                profiles = _load_profiles()
+                rows = "".join(
+                    f"<tr><td>{p}</td><td>{v.get('trades',0)}</td>"
+                    f"<td>{(v['wins']/max(v['trades'],1)):.1%}</td>"
+                    f"<td>{v.get('total_r',0):.2f}R</td></tr>"
+                    for p, v in profiles.items() if v.get("trades",0) > 0)
+                html = (f"<h2>Evolution Report — {now.strftime('%Y-%m-%d')}</h2>"
+                        f"<table border=1 cellpadding=4><tr><th>Pair</th><th>Trades</th>"
+                        f"<th>WR</th><th>Total R</th></tr>{rows}</table>")
+                if send_email(f"AutoTrader Evolution — {now.strftime('%Y-%m-%d')}", html):
+                    _mark_email("evolution")
+            # Daily 09:00 UTC — trade report
+            if now.hour == 9 and now.minute < 5 and not _email_sent_today("trade"):
+                if ensure_mt5():
+                    history_from = datetime.now(timezone.utc) - timedelta(days=1)
+                    deals = _mt5.history_deals_get(history_from, datetime.now(timezone.utc)) or []
+                    omega = [d for d in deals if d.magic == 234000 and d.entry == _mt5.DEAL_ENTRY_OUT]
+                    rows = "".join(
+                        f"<tr><td>{d.symbol}</td><td>${d.profit:.2f}</td></tr>"
+                        for d in omega)
+                    html = f"<h2>Trade Report — {now.strftime('%Y-%m-%d')}</h2><table border=1>{rows}</table>"
+                    if send_email(f"AutoTrader Trades — {now.strftime('%Y-%m-%d')}", html):
+                        _mark_email("trade")
         except Exception as e:
-            log.warning(f"place_demo_trade error {pair}: {e}")
+            log.debug(f"scheduler error: {e}")
+        time.sleep(60)
+
+# ── Telegram BOT (command handler) ─────────────────────────────────────────────
+TRADING_ENABLED = True
+_bot = None
+
+def close_all_positions():
+    if not ensure_mt5(): return 0
+    positions = _mt5.positions_get() or []
+    n = 0
+    for p in positions:
+        if close_position(p): n += 1
+    return n
+
+def start_telegram_bot():
+    """Background thread: poll Telegram for commands."""
+    global _bot
+    try:
+        import telebot
+    except ImportError:
+        log.warning("pytelegrambotapi not installed — bot disabled")
+        return
+    if not TG_TOKEN:
+        log.warning("TELEGRAM_BOT_TOKEN missing — bot disabled")
+        return
+
+    _bot = telebot.TeleBot(TG_TOKEN, threaded=False)
+
+    def _is_auth(message) -> bool:
+        try:
+            return str(message.chat.id) == str(TG_CHAT)
+        except Exception:
             return False
 
+    @_bot.message_handler(commands=["status"])
+    def cmd_status(message):
+        if not _is_auth(message): return
+        try:
+            info = _mt5.account_info() if ensure_mt5() else None
+            positions = _mt5.positions_get() or [] if ensure_mt5() else []
+            ram = get_ram_pct()
+            bal = info.balance if info else 0
+            eq  = info.equity if info else 0
+            progress = ((bal - START_BALANCE_BASE) / START_BALANCE_BASE * 100) if bal else 0
+            _bot.reply_to(message,
+                f"=== STATUS ===\n"
+                f"Balance: ${bal:.2f}\n"
+                f"Equity: ${eq:.2f}\n"
+                f"Open trades: {len(positions)}\n"
+                f"RAM: {ram:.1f}%\n"
+                f"Iteration: {_iteration}\n"
+                f"MT5: {'Connected' if _mt5_connected else 'Disconnected'}\n"
+                f"Trading: {'ENABLED' if TRADING_ENABLED else 'PAUSED'}\n"
+                f"Target: ${START_BALANCE_TARGET:.0f}\n"
+                f"Progress: {progress:.2f}%")
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+    @_bot.message_handler(commands=["balance"])
+    def cmd_balance(message):
+        if not _is_auth(message): return
+        try:
+            if not ensure_mt5():
+                _bot.reply_to(message, "MT5 disconnected"); return
+            info = _mt5.account_info()
+            bal = info.balance; eq = info.equity
+            progress = (bal - START_BALANCE_BASE) / START_BALANCE_BASE * 100
+            _bot.reply_to(message,
+                f"Balance: ${bal:.2f}\n"
+                f"Equity: ${eq:.2f}\n"
+                f"Progress: {progress:.2f}%\n"
+                f"Target: ${START_BALANCE_TARGET:.0f}")
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
+    @_bot.message_handler(commands=["trades"])
+    def cmd_trades(message):
+        if not _is_auth(message): return
+        try:
+            if not ensure_mt5():
+                _bot.reply_to(message, "MT5 disconnected"); return
+            positions = _mt5.positions_get() or []
+            if not positions:
+                _bot.reply_to(message, "No open trades."); return
+            msg = "=== OPEN TRADES ===\n"
+            for p in positions:
+                direction = "BUY" if p.type == _mt5.ORDER_TYPE_BUY else "SELL"
+                msg += (f"{p.symbol} {direction}\n"
+                        f"Entry: {p.price_open}\n"
+                        f"SL: {p.sl} | TP: {p.tp}\n"
+                        f"PnL: ${p.profit:+.2f}\n"
+                        f"Lots: {p.volume} | Ticket: {p.ticket}\n\n")
+            _bot.reply_to(message, msg)
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
+    @_bot.message_handler(commands=["pause"])
+    def cmd_pause(message):
+        if not _is_auth(message): return
+        global TRADING_ENABLED
+        TRADING_ENABLED = False
+        _bot.reply_to(message,
+            "⏸ Trading PAUSED.\n"
+            "Monitoring continues.\n"
+            "Send /resume to restart.")
+
+    @_bot.message_handler(commands=["resume"])
+    def cmd_resume(message):
+        if not _is_auth(message): return
+        global TRADING_ENABLED
+        TRADING_ENABLED = True
+        _bot.reply_to(message,
+            "▶ Trading RESUMED.\n"
+            "Scanning markets now.")
+
+    @_bot.message_handler(commands=["stop"])
+    def cmd_stop(message):
+        if not _is_auth(message): return
+        _bot.reply_to(message,
+            "🛑 Emergency stop received.\n"
+            "Closing all positions...\n"
+            "System shutting down safely.")
+        try:
+            n = close_all_positions()
+            _bot.send_message(TG_CHAT, f"Closed {n} positions. Exiting.")
+        except Exception as e:
+            _bot.send_message(TG_CHAT, f"Close error: {e}")
+        os._exit(0)
+
+    @_bot.message_handler(commands=["close"])
+    def cmd_close(message):
+        if not _is_auth(message): return
+        try:
+            if not ensure_mt5():
+                _bot.reply_to(message, "MT5 disconnected"); return
+            positions = _mt5.positions_get() or []
+            if not positions:
+                _bot.reply_to(message, "No open trades to close."); return
+            n = close_all_positions()
+            info = _mt5.account_info()
+            _bot.reply_to(message,
+                f"Closed {n}/{len(positions)} trades.\n"
+                f"Balance: ${info.balance:.2f}")
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
+    @_bot.message_handler(commands=["ram"])
+    def cmd_ram(message):
+        if not _is_auth(message): return
+        try:
+            import psutil
+            ram = psutil.virtual_memory()
+            _bot.reply_to(message,
+                f"RAM Used: {ram.percent:.1f}%\n"
+                f"Used: {ram.used/1e9:.2f}GB\n"
+                f"Free: {ram.available/1e9:.2f}GB\n"
+                f"Total: {ram.total/1e9:.2f}GB")
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
+    @_bot.message_handler(commands=["report"])
+    def cmd_report(message):
+        if not _is_auth(message): return
+        try:
+            if not ensure_mt5():
+                _bot.reply_to(message, "MT5 disconnected"); return
+            info = _mt5.account_info()
+            positions = _mt5.positions_get() or []
+            profiles = _load_profiles()
+            lines = [f"=== FULL REPORT ===",
+                     f"Balance: ${info.balance:.2f} | Equity: ${info.equity:.2f}",
+                     f"Open positions: {len(positions)}",
+                     f"Iteration: {_iteration}",
+                     f"Trading: {'ENABLED' if TRADING_ENABLED else 'PAUSED'}",
+                     f"RAM: {get_ram_pct():.1f}%",
+                     "",
+                     "Pair learning:"]
+            for pair, p in sorted(profiles.items()):
+                trades = p.get("trades", 0)
+                if trades > 0:
+                    wr = p.get("wins", 0) / trades
+                    lines.append(f"  {pair}: {trades}t WR={wr:.0%} R={p.get('total_r',0):.1f}")
+            if len(lines) == 8:
+                lines.append("  (no closed trades yet)")
+            _bot.reply_to(message, "\n".join(lines))
+        except Exception as e:
+            _bot.reply_to(message, f"Error: {e}")
+
+    @_bot.message_handler(commands=["help", "start"])
+    def cmd_help(message):
+        if not _is_auth(message): return
+        _bot.reply_to(message,
+            "=== COMMANDS ===\n"
+            "/status  - full status\n"
+            "/balance - balance check\n"
+            "/trades  - open trades\n"
+            "/pause   - pause trading\n"
+            "/resume  - resume trading\n"
+            "/close   - close all trades\n"
+            "/stop    - emergency stop\n"
+            "/ram     - memory usage\n"
+            "/report  - send report\n"
+            "/help    - this menu")
+
+    log.info("Telegram bot starting infinity_polling...")
+    while True:
+        try:
+            _bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        except Exception as e:
+            log.warning(f"Telegram bot error: {e}")
+            time.sleep(10)
+            continue
+
+# ── MAIN LOOP ──────────────────────────────────────────────────────────────────
+_running = True
+_iteration = 0
+_telegram_report_every = 50
+
+def main_scan_loop():
+    """Adaptive scan: every 5 min, classify, find entry, place trade."""
+    global _iteration
+    state = load_state()
+    _iteration = state.get("iteration", 0)
+
+    # Background threads
+    threading.Thread(target=monitor_positions_loop, daemon=True, name="monitor").start()
+    threading.Thread(target=evolution_loop, daemon=True, name="evolution").start()
+    threading.Thread(target=scheduler_loop, daemon=True, name="scheduler").start()
+    threading.Thread(target=start_telegram_bot, daemon=True, name="telebot").start()
+
+    # Start-up banner
+    if ensure_mt5():
+        info = _mt5.account_info()
+        send_telegram(
+            f"🚀 AUTOTRADER OMEGA v4.0 — ADAPTIVE\n"
+            f"MT5: Connected | Balance: ${info.balance:.2f}\n"
+            f"Pairs: {len(PAIRS)} | Sessions: London + NY\n"
+            f"Risk: 1%/trade | Max DD: 3% daily\n"
+            f"Target: ${START_BALANCE_TARGET:.0f}")
+
+    while _running:
+        try:
+            if not ensure_mt5():
+                log.warning("MT5 disconnected — retrying in 30s")
+                time.sleep(30); continue
+
+            positions = _mt5.positions_get() or []
+            open_omega = [p for p in positions if p.magic == 234000]
+
+            if TRADING_ENABLED and len(open_omega) < MAX_OPEN_TRADES and in_session() and check_daily_limit():
+                for pair in PAIRS:
+                    if len(open_omega) >= MAX_OPEN_TRADES: break
+                    if not check_correlation(pair): continue
+
+                    condition = classify_market(pair)
+                    if condition.get("behavior") == "skip":
+                        continue
+                    profile = get_profile(pair)
+                    entry = find_entry(pair, condition, profile)
+                    if not entry: continue
+
+                    sl_res = calculate_sl(pair, entry["direction"], condition)
+                    if sl_res is None: continue
+                    sl, sl_dist = sl_res
+
+                    info = _mt5.account_info()
+                    if info is None: continue
+                    lots = calculate_lots(pair, sl_dist, info.balance)
+                    tick = _mt5.symbol_info_tick(pair)
+                    if tick is None: continue
+                    entry_px = tick.ask if entry["direction"] == "buy" else tick.bid
+                    tp = calculate_tp(entry_px, sl_dist, entry["direction"], condition)
+                    rrr = abs(tp - entry_px) / sl_dist
+                    if rrr < MIN_RRR: continue
+
+                    result = place_trade(pair, entry["direction"], sl, tp, lots)
+                    if result and result.retcode == _mt5.TRADE_RETCODE_DONE:
+                        send_telegram(
+                            f"🎯 TRADE OPENED\n"
+                            f"Pair: {pair} | Direction: {entry['direction'].upper()}\n"
+                            f"Condition: {condition.get('condition')}\n"
+                            f"Confidence: {entry['confidence']:.0%}\n"
+                            f"Signals: {', '.join(entry['signals'])}\n"
+                            f"Entry: {entry_px:.5f}\n"
+                            f"SL: {sl:.5f} | TP: {tp:.5f} | RRR: {rrr:.2f}\n"
+                            f"Lots: {lots} | Risk: ${info.balance*MAX_RISK_PER_TRADE:.0f}\n"
+                            f"Balance: ${info.balance:.2f}")
+                        log.info(f"TRADE OPENED {pair} {entry['direction']} @{entry_px} SL={sl} TP={tp}")
+                        open_omega.append(result)
+
+            _iteration += 1
+            state["iteration"] = _iteration
+            save_state(state)
+            if _iteration % _telegram_report_every == 0:
+                info = _mt5.account_info()
+                send_telegram(
+                    f"📊 Heartbeat iter {_iteration}\n"
+                    f"Balance: ${info.balance if info else 0:.2f}\n"
+                    f"Open: {len(open_omega)} | RAM: {get_ram_pct():.0f}%")
+
+        except Exception as e:
+            log.error(f"main_scan_loop error: {e}", exc_info=True)
+            time.sleep(30); continue
+        time.sleep(300)  # 5 min scan
+
+# ── Entry ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    AutoTrader().run_forever()
+    # Connect MT5 with retry loop
+    while not ensure_mt5():
+        log.info("MT5 connect retry in 30s...")
+        time.sleep(30)
+    info = _mt5.account_info()
+    send_telegram(f"✅ MT5 CONNECTED — Balance: ${info.balance:.2f}")
+    log.info(f"Starting main_scan_loop — Balance ${info.balance:.2f}")
+    main_scan_loop()
