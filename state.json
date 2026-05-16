@@ -1,11 +1,11 @@
 {
-  "iteration": 382,
+  "iteration": 389,
   "best_wr": {
     "XAUUSD": 35.9,
     "USDJPY": 32.8,
     "GBPUSD": 31.9,
     "BTCUSD": 29.3,
-    "USDCHF": 21.5
+    "USDCAD": 38.3
   },
   "best_expectancy": {},
   "best_score": {
@@ -13,7 +13,7 @@
     "USDJPY": 0.40015999999999996,
     "GBPUSD": 0.44978999999999997,
     "BTCUSD": 0.36332,
-    "USDCHF": 0.29455000000000003
+    "USDCAD": 0.7123799999999999
   },
   "best_params": {
     "XAUUSD": {
@@ -88,19 +88,19 @@
       "min_confluence": 3,
       "version": 1
     },
-    "USDCHF": {
-      "ema_fast": 8,
-      "ema_slow": 50,
+    "USDCAD": {
+      "ema_fast": 21,
+      "ema_slow": 89,
       "rsi_period": 14,
-      "rsi_long_max": 65,
+      "rsi_long_max": 60,
       "rsi_short_min": 35,
       "atr_period": 14,
       "sl_atr_mult": 0.5,
-      "tp_rrr": 5.0,
+      "tp_rrr": 3.0,
       "trail_atr_mult": 1.5,
       "partial1_r": 1.5,
       "partial2_r": 2.5,
-      "min_adx": 25,
+      "min_adx": 30,
       "use_adx": true,
       "use_ema_stack": true,
       "min_confluence": 3,
@@ -172,7 +172,7 @@
       "min_adx": 30,
       "use_adx": true,
       "use_ema_stack": true,
-      "min_confluence": 4,
+      "min_confluence": 3,
       "version": 1
     },
     "BTCUSD": {
@@ -300,24 +300,6 @@
       "use_ema_stack": true,
       "min_confluence": 3,
       "version": 1
-    },
-    "USDCHF": {
-      "ema_fast": 8,
-      "ema_slow": 50,
-      "rsi_period": 14,
-      "rsi_long_max": 65,
-      "rsi_short_min": 35,
-      "atr_period": 14,
-      "sl_atr_mult": 0.5,
-      "tp_rrr": 5.0,
-      "trail_atr_mult": 1.5,
-      "partial1_r": 1.5,
-      "partial2_r": 2.5,
-      "min_adx": 25,
-      "use_adx": true,
-      "use_ema_stack": true,
-      "min_confluence": 3,
-      "version": 1
     }
   },
   "saved": "2026-05-15T08:53:14.120043+00:00",
@@ -326,10 +308,11 @@
     "USDJPY": 1.22,
     "GBPUSD": 1.41,
     "BTCUSD": 1.24,
-    "USDCHF": 1.37
+    "USDCAD": 1.86
   },
   "pair_approved": {
-    "XAUUSD": true
+    "XAUUSD": true,
+    "USDCAD": true
   },
   "start_balance": 9999.87
 }
