@@ -1,11 +1,12 @@
 {
-  "iteration": 395,
+  "iteration": 401,
   "best_wr": {
     "XAUUSD": 35.9,
     "USDJPY": 32.8,
     "GBPUSD": 31.9,
     "BTCUSD": 29.3,
-    "EURUSD": 28.5
+    "NZDUSD": 26.5,
+    "AUDUSD": 27.8
   },
   "best_expectancy": {},
   "best_score": {
@@ -13,7 +14,8 @@
     "USDJPY": 0.40015999999999996,
     "GBPUSD": 0.44978999999999997,
     "BTCUSD": 0.36332,
-    "EURUSD": 0.34199999999999997
+    "NZDUSD": 0.2862,
+    "AUDUSD": 0.3197
   },
   "best_params": {
     "XAUUSD": {
@@ -88,22 +90,40 @@
       "min_confluence": 3,
       "version": 1
     },
-    "EURUSD": {
-      "ema_fast": 21,
-      "ema_slow": 89,
+    "NZDUSD": {
+      "ema_fast": 8,
+      "ema_slow": 50,
       "rsi_period": 14,
       "rsi_long_max": 65,
       "rsi_short_min": 35,
       "atr_period": 14,
-      "sl_atr_mult": 0.6,
+      "sl_atr_mult": 0.5,
       "tp_rrr": 3.0,
       "trail_atr_mult": 1.5,
       "partial1_r": 1.5,
       "partial2_r": 2.5,
-      "min_adx": 15,
+      "min_adx": 30,
       "use_adx": true,
       "use_ema_stack": true,
       "min_confluence": 3,
+      "version": 1
+    },
+    "AUDUSD": {
+      "ema_fast": 8,
+      "ema_slow": 50,
+      "rsi_period": 14,
+      "rsi_long_max": 60,
+      "rsi_short_min": 25,
+      "atr_period": 14,
+      "sl_atr_mult": 0.5,
+      "tp_rrr": 3.0,
+      "trail_atr_mult": 2.0,
+      "partial1_r": 1.5,
+      "partial2_r": 2.5,
+      "min_adx": 25,
+      "use_adx": true,
+      "use_ema_stack": true,
+      "min_confluence": 2,
       "version": 1
     }
   },
@@ -144,7 +164,7 @@
       "ema_slow": 50,
       "rsi_period": 14,
       "rsi_long_max": 60,
-      "rsi_short_min": 35,
+      "rsi_short_min": 25,
       "atr_period": 14,
       "sl_atr_mult": 0.5,
       "tp_rrr": 3.0,
@@ -241,7 +261,7 @@
       "trail_atr_mult": 1.5,
       "partial1_r": 1.5,
       "partial2_r": 2.5,
-      "min_adx": 15,
+      "min_adx": 20,
       "use_adx": true,
       "use_ema_stack": true,
       "min_confluence": 3,
@@ -300,6 +320,24 @@
       "use_ema_stack": true,
       "min_confluence": 3,
       "version": 1
+    },
+    "NZDUSD": {
+      "ema_fast": 8,
+      "ema_slow": 50,
+      "rsi_period": 14,
+      "rsi_long_max": 65,
+      "rsi_short_min": 35,
+      "atr_period": 14,
+      "sl_atr_mult": 0.5,
+      "tp_rrr": 3.0,
+      "trail_atr_mult": 1.5,
+      "partial1_r": 1.5,
+      "partial2_r": 2.5,
+      "min_adx": 30,
+      "use_adx": true,
+      "use_ema_stack": true,
+      "min_confluence": 3,
+      "version": 1
     }
   },
   "saved": "2026-05-15T08:53:14.120043+00:00",
@@ -308,7 +346,8 @@
     "USDJPY": 1.22,
     "GBPUSD": 1.41,
     "BTCUSD": 1.24,
-    "EURUSD": 1.2
+    "NZDUSD": 1.08,
+    "AUDUSD": 1.15
   },
   "pair_approved": {
     "XAUUSD": true
