@@ -1,14 +1,14 @@
 {
-  "iteration": 370,
+  "iteration": 376,
   "best_wr": {
-    "XAUUSD": 35.9,
+    "XAUUSD": 39.3,
     "USDJPY": 32.8,
     "GBPUSD": 31.9,
     "BTCUSD": 29.3
   },
   "best_expectancy": {},
   "best_score": {
-    "XAUUSD": 0.60312,
+    "XAUUSD": 0.63666,
     "USDJPY": 0.40015999999999996,
     "GBPUSD": 0.44978999999999997,
     "BTCUSD": 0.36332
@@ -22,7 +22,7 @@
       "rsi_short_min": 30,
       "atr_period": 14,
       "sl_atr_mult": 0.5,
-      "tp_rrr": 3.0,
+      "tp_rrr": 2.5,
       "trail_atr_mult": 1.5,
       "partial1_r": 1.5,
       "partial2_r": 2.5,
@@ -199,7 +199,7 @@
       "rsi_short_min": 30,
       "atr_period": 14,
       "sl_atr_mult": 0.5,
-      "tp_rrr": 3.0,
+      "tp_rrr": 2.5,
       "trail_atr_mult": 1.5,
       "partial1_r": 1.5,
       "partial2_r": 2.5,
@@ -284,7 +284,7 @@
   },
   "saved": "2026-05-15T08:53:14.120043+00:00",
   "best_pf": {
-    "XAUUSD": 1.68,
+    "XAUUSD": 1.62,
     "USDJPY": 1.22,
     "GBPUSD": 1.41,
     "BTCUSD": 1.24
