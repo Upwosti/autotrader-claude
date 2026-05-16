@@ -98,6 +98,7 @@ def urgent_sender():
         try:
             msg = urgent_q.get(timeout=1)
             _post(msg, 5)
+            time.sleep(0.4)  # pacing to avoid 429
         except queue.Empty:
             continue
         except Exception:
@@ -301,6 +302,235 @@ def run_backtest_vectorized(pair: str, df: pd.DataFrame) -> dict:
     return {"win_rate": round(wr * 100, 1), "avg_rrr": round(avg_rrr, 2),
             "expectancy": round(expectancy, 4), "total_trades": total,
             "rank_score": round(float(rank_score), 3)}
+
+# ── Aggressive backtest (70%+ WR / 3+ RRR qualification) ─────────────────────
+QUALIFIED_PAIRS: list = []
+QUAL_F   = os.path.join(DATADIR, "qualified_pairs.json")
+BT_RES_F = os.path.join(DATADIR, "backtest_results.json")
+
+def backtest_aggressive(pair: str, df: pd.DataFrame) -> dict:
+    """Strict: 70%+ WR, 3+ RRR, structure-aware exits 3R/5R/10R/15R."""
+    close = df['close'].values; high = df['high'].values; low = df['low'].values
+    opens = df['open'].values
+    vol   = df['tick_volume'].values if 'tick_volume' in df.columns else np.ones(len(close))
+    n = len(close)
+    if n < 350:
+        return {"pair":pair,"total_trades":0,"wins":0,"losses":0,"win_rate":0,
+                "avg_rrr":0,"min_rrr":0,"max_rrr":0,"expectancy":0,
+                "qualify":False,"reason":"insufficient_data"}
+    atr_v  = calc_atr(high, low, close, 14)
+    ema20  = calc_ema(close, 20)
+    ema50  = calc_ema(close, 50)
+    ema200 = calc_ema(close, 200)
+    adx_v  = calc_adx(high, low, close, 14)
+    rsi_v  = calc_rsi(close, 14)
+
+    trades = []
+    position = 0; entry_price = 0.0; sl = 0.0; sl_dist = 0.0; entry_idx = 0
+    for i in range(300, n - 50):
+        if position == 0:
+            # Strong trend + RSI zone + ADX
+            if (close[i] > ema20[i] > ema50[i] > ema200[i] and
+                55 < rsi_v[i] < 75 and adx_v[i] > 28):
+                bias = 1
+            elif (close[i] < ema20[i] < ema50[i] < ema200[i] and
+                  25 < rsi_v[i] < 45 and adx_v[i] > 28):
+                bias = -1
+            else:
+                continue
+            # Pullback proximity to EMA20
+            if abs(close[i] - ema20[i]) > atr_v[i] * 0.8:
+                continue
+            # Volume surge
+            vol_avg = float(np.mean(vol[max(0, i-20):i])) if i >= 20 else 0
+            if vol_avg <= 0 or vol[i] < vol_avg * 1.2:
+                continue
+            # Candle confirmation (2 of last 3)
+            if bias == 1:
+                if sum(1 for j in range(i-2, i+1) if close[j] > opens[j]) < 2: continue
+            else:
+                if sum(1 for j in range(i-2, i+1) if close[j] < opens[j]) < 2: continue
+            entry_price = close[i]; entry_idx = i; atr_now = atr_v[i]
+            if bias == 1:
+                sl = float(np.min(low[i-20:i])) - atr_now * 0.3
+            else:
+                sl = float(np.max(high[i-20:i])) + atr_now * 0.3
+            sl_dist = abs(entry_price - sl)
+            if sl_dist < atr_now * 0.5 or sl_dist > atr_now * 4:
+                continue
+            position = bias
+            continue
+
+        # Manage open position
+        if position == 1:
+            if low[i] <= sl:
+                trades.append({"win": False, "rrr": 0, "reason": "sl_hit"}); position = 0; continue
+            cur_r = (close[i] - entry_price) / sl_dist
+            if cur_r >= 15.0:
+                trades.append({"win": True, "rrr": 15.0, "reason": "target_15r"}); position = 0; continue
+            if cur_r >= 10.0:
+                trades.append({"win": True, "rrr": 10.0, "reason": "target_10r"}); position = 0; continue
+            if cur_r >= 5.0 and adx_v[i] < 22:
+                trades.append({"win": True, "rrr": 5.0, "reason": "trend_dead"}); position = 0; continue
+            if cur_r >= 3.0 and close[i] < ema50[i]:
+                trades.append({"win": True, "rrr": 3.0, "reason": "structure_break"}); position = 0; continue
+        else:  # short
+            if high[i] >= sl:
+                trades.append({"win": False, "rrr": 0, "reason": "sl_hit"}); position = 0; continue
+            cur_r = (entry_price - close[i]) / sl_dist
+            if cur_r >= 15.0:
+                trades.append({"win": True, "rrr": 15.0, "reason": "target_15r"}); position = 0; continue
+            if cur_r >= 10.0:
+                trades.append({"win": True, "rrr": 10.0, "reason": "target_10r"}); position = 0; continue
+            if cur_r >= 5.0 and adx_v[i] < 22:
+                trades.append({"win": True, "rrr": 5.0, "reason": "trend_dead"}); position = 0; continue
+            if cur_r >= 3.0 and close[i] > ema50[i]:
+                trades.append({"win": True, "rrr": 3.0, "reason": "structure_break"}); position = 0; continue
+
+    if not trades:
+        return {"pair":pair,"total_trades":0,"wins":0,"losses":0,"win_rate":0,
+                "avg_rrr":0,"min_rrr":0,"max_rrr":0,"expectancy":0,
+                "qualify":False,"reason":"no_trades"}
+    wins = [t for t in trades if t["win"]]
+    total = len(trades)
+    wr = len(wins) / total * 100
+    rrrs = [t["rrr"] for t in wins]
+    avg_rrr = float(np.mean(rrrs)) if rrrs else 0.0
+    min_rrr = float(np.min(rrrs))  if rrrs else 0.0
+    max_rrr = float(np.max(rrrs))  if rrrs else 0.0
+    expectancy = (wr/100 * avg_rrr) - ((1 - wr/100) * 1.0)
+    qualify = (total >= 20 and wr >= 70.0 and avg_rrr >= 3.0 and expectancy >= 1.5)
+    reason = "QUALIFIED" if qualify else f"WR={wr:.0f}% RRR={avg_rrr:.1f} Trades={total}"
+    return {
+        "pair": pair, "total_trades": total, "wins": len(wins), "losses": total - len(wins),
+        "win_rate": round(wr, 1), "avg_rrr": round(avg_rrr, 2),
+        "min_rrr": round(min_rrr, 2), "max_rrr": round(max_rrr, 2),
+        "expectancy": round(expectancy, 3), "qualify": qualify, "reason": reason,
+    }
+
+def save_backtest_results(results: dict, qualified: list):
+    os.makedirs(DATADIR, exist_ok=True)
+    with open(BT_RES_F, "w") as f: json.dump(results, f, indent=2, default=str)
+    with open(QUAL_F,   "w") as f: json.dump({"qualified": qualified}, f, indent=2)
+
+def load_qualified():
+    global QUALIFIED_PAIRS
+    try:
+        with open(QUAL_F) as f:
+            QUALIFIED_PAIRS = json.load(f).get("qualified", [])
+    except Exception:
+        QUALIFIED_PAIRS = []
+
+def load_backtest_results() -> dict:
+    try:
+        with open(BT_RES_F) as f: return json.load(f)
+    except Exception: return {}
+
+def send_backtest_report(results: dict, qualified: list):
+    if not results:
+        tg("No backtest results", urgent=True); return
+    total = len(results); qcount = len(qualified)
+    # PART 1 summary
+    tg("=== 2-YEAR BACKTEST REPORT ===\n"
+       f"Pairs tested: {total}/18 | Qualified: {qcount}\n"
+       f"Criteria: WR>=70% | RRR>=3.0 | Exp>=1.5 | Trades>=20", urgent=True)
+    # PART 2 qualified
+    if qualified:
+        msg = "=== QUALIFIED (TRADE THESE) ===\n"
+        qsorted = sorted([results[p] for p in qualified], key=lambda x: x["expectancy"], reverse=True)
+        for i, r in enumerate(qsorted):
+            msg += (f"#{i+1} {r['pair']} | WR {r['win_rate']:.1f}% | "
+                    f"RRR {r['avg_rrr']:.2f} | Exp {r['expectancy']:.3f} | "
+                    f"T={r['total_trades']} | Range {r['min_rrr']:.1f}-{r['max_rrr']:.1f}R\n")
+        tg(msg)
+    else:
+        tg("NO PAIRS QUALIFIED at WR>=70 RRR>=3 — top by expectancy used as fallback")
+    # PART 3 all ranked
+    all_sorted = sorted(results.values(), key=lambda x: x["expectancy"], reverse=True)
+    msg = "=== ALL PAIRS (ranked) ===\n"
+    for i, r in enumerate(all_sorted):
+        sym = "[OK]" if r["qualify"] else "[--]"
+        msg += (f"{sym} #{i+1} {r['pair']} | WR {r['win_rate']:.1f}% | "
+                f"RRR {r['avg_rrr']:.2f} | Exp {r['expectancy']:.3f} | T={r['total_trades']}\n")
+    tg(msg)
+    # PART 4 failed top reasons
+    failed = [r for r in all_sorted if not r["qualify"]]
+    if failed:
+        msg = "=== FAILED (analysis) ===\n"
+        for r in failed[:8]:
+            msg += f"{r['pair']}: {r['reason']}\n"
+        tg(msg)
+    # PART 5 overall stats
+    valid = [r for r in all_sorted if r["total_trades"] > 0]
+    if valid:
+        wrs  = [r["win_rate"]   for r in valid]
+        rrrs = [r["avg_rrr"]    for r in valid]
+        exps = [r["expectancy"] for r in valid]
+        tg("=== OVERALL STATISTICS ===\n"
+           f"WR avg/min/max: {float(np.mean(wrs)):.1f}% / {float(np.min(wrs)):.1f}% / {float(np.max(wrs)):.1f}%\n"
+           f"RRR avg/min/max: {float(np.mean(rrrs)):.2f} / {float(np.min(rrrs)):.2f} / {float(np.max(rrrs)):.2f}\n"
+           f"Exp avg/min/max: {float(np.mean(exps)):.3f} / {float(np.min(exps)):.3f} / {float(np.max(exps)):.3f}")
+
+def run_full_backtest():
+    global QUALIFIED_PAIRS
+    tg("Starting FULL 2-year aggressive backtest on 18 pairs (70%+ WR / 3+ RRR filter)...", urgent=True)
+    results = {}; qualified = []
+    for i, pair in enumerate(PAIRS_18):
+        try:
+            tg(f"[{i+1}/18] Testing {pair}...")
+            df = get_data(pair, "H4", 3500)
+            if df is None or len(df) < 500:
+                tg(f"[X] {pair}: insufficient data")
+                continue
+            r = backtest_aggressive(pair, df)
+            results[pair] = r
+            if r["qualify"]:
+                qualified.append(pair)
+                tg(f"[OK] {pair} QUALIFIES | WR {r['win_rate']:.1f}% RRR {r['avg_rrr']:.2f} "
+                   f"Exp {r['expectancy']:.3f} T={r['total_trades']}", urgent=True)
+            else:
+                tg(f"[--] {pair}: {r['reason']}")
+            gc.collect()
+        except Exception as e:
+            tg(f"[X] {pair}: error — {str(e)[:80]}")
+            log_error(f"backtest {pair}: {e}")
+    save_backtest_results(results, qualified)
+    QUALIFIED_PAIRS = qualified
+    send_backtest_report(results, qualified)
+    return results
+
+# ── Daily backtest update ────────────────────────────────────────────────────
+def daily_backtest_update():
+    last_run_date = None
+    while True:
+        try:
+            now = datetime.utcnow()
+            today = now.strftime("%Y-%m-%d")
+            if now.hour == 0 and now.minute < 30 and last_run_date != today:
+                last_run_date = today
+                tg("Daily backtest update starting...", urgent=True)
+                pairs_to_test = QUALIFIED_PAIRS or PAIRS_18
+                results = {}
+                for pair in pairs_to_test:
+                    try:
+                        df = get_data(pair, "H4", 3500)
+                        if df is not None and len(df) >= 500:
+                            results[pair] = backtest_aggressive(pair, df)
+                        time.sleep(0.5)
+                    except Exception:
+                        continue
+                msg = "=== DAILY BACKTEST UPDATE ===\n"
+                for pair, r in results.items():
+                    msg += f"{pair}: WR {r['win_rate']:.1f}% RRR {r['avg_rrr']:.2f} T={r['total_trades']}\n"
+                tg(msg, urgent=True)
+                # Refresh qualified list
+                new_qual = [p for p, r in results.items() if r.get("qualify")]
+                if new_qual:
+                    QUALIFIED_PAIRS[:] = new_qual
+                    save_backtest_results(load_backtest_results() | results, new_qual)
+            time.sleep(900)  # check every 15 min
+        except Exception as e:
+            log_error(f"daily_update: {e}"); time.sleep(900)
 
 def analyze_2yr_all_pairs():
     if os.path.exists(ANAL_F):
@@ -646,13 +876,18 @@ def scanner():
             if not check_limits(): time.sleep(3600); continue
             with _mt5_lock: positions = mt5.positions_get() or []
             if len(positions) >= LIMITS["MAX_OPEN_TRADES"]: time.sleep(60); continue
-            analysis = load_analysis()
-            # Pick top-10 by rank_score, else default to PAIRS_18
-            if analysis:
-                ranked = sorted(analysis.items(), key=lambda x: x[1].get("rank_score", 0), reverse=True)
-                candidates = [p for p, _ in ranked[:10]]
+            # Priority 1: QUALIFIED pairs (70%+ WR, 3+ RRR backtest)
+            # Priority 2: top-10 by rank_score from 2yr analysis
+            # Priority 3: first 10 of PAIRS_18
+            if QUALIFIED_PAIRS:
+                candidates = QUALIFIED_PAIRS[:10]
             else:
-                candidates = PAIRS_18[:10]
+                analysis = load_analysis()
+                if analysis:
+                    ranked = sorted(analysis.items(), key=lambda x: x[1].get("rank_score", 0), reverse=True)
+                    candidates = [p for p, _ in ranked[:10]]
+                else:
+                    candidates = PAIRS_18[:10]
             best = None; best_conf = 0
             for pair in candidates:
                 try:
@@ -722,6 +957,7 @@ if bot:
             "/status /balance /trades\n"
             "/progress /analysis /best\n"
             "/evolution /ftmo\n"
+            "/backtest /qualified /report /stats\n"
             "/pause /resume /close /stop\n"
             "/ram /help")
 
@@ -879,6 +1115,48 @@ if bot:
         ram = psutil.virtual_memory()
         bot.reply_to(m, f"RAM: {ram.percent:.0f}%\nUsed: {ram.used/1e9:.1f}GB\nFree: {ram.available/1e9:.1f}GB")
 
+    @bot.message_handler(commands=["backtest"])
+    def cmd_backtest(m):
+        if not _auth(m): return
+        bot.reply_to(m, "Backtest started — full updates via Telegram (~10 min)")
+        threading.Thread(target=lambda: run_safe(run_full_backtest, "BACKTEST_MANUAL"),
+                         daemon=True, name="BACKTEST_MANUAL").start()
+
+    @bot.message_handler(commands=["qualified"])
+    def cmd_qualified(m):
+        if not _auth(m): return
+        load_qualified()
+        if QUALIFIED_PAIRS:
+            bot.reply_to(m, f"[OK] {len(QUALIFIED_PAIRS)} QUALIFIED PAIRS:\n" + "\n".join(QUALIFIED_PAIRS))
+        else:
+            bot.reply_to(m, "No qualified pairs yet — run /backtest")
+
+    @bot.message_handler(commands=["report"])
+    def cmd_report(m):
+        if not _auth(m): return
+        results = load_backtest_results()
+        if not results:
+            bot.reply_to(m, "No backtest results yet — run /backtest")
+            return
+        bot.reply_to(m, "Sending full backtest report...")
+        send_backtest_report(results, QUALIFIED_PAIRS)
+
+    @bot.message_handler(commands=["stats"])
+    def cmd_stats(m):
+        if not _auth(m): return
+        results = load_backtest_results()
+        if not results:
+            bot.reply_to(m, "No results yet — run /backtest"); return
+        valid = [r for r in results.values() if r.get("total_trades", 0) > 0]
+        if not valid:
+            bot.reply_to(m, "No valid backtest data"); return
+        wrs = [r["win_rate"] for r in valid]; rrrs = [r["avg_rrr"] for r in valid]
+        bot.reply_to(m,
+            f"Pairs tested: {len(valid)}\n"
+            f"Avg WR: {float(np.mean(wrs)):.1f}%\n"
+            f"Avg RRR: {float(np.mean(rrrs)):.2f}\n"
+            f"Qualified: {len(QUALIFIED_PAIRS)}")
+
 def bot_loop():
     if not bot: return
     while True:
@@ -953,35 +1231,42 @@ if __name__ == "__main__":
         peak_balance = info.balance
         save_state(state)
 
-    # 2yr analysis (background)
+    # Load qualified pairs from disk (if previous backtest done)
+    load_qualified()
+
+    # 2yr light analysis + aggressive backtest (background, non-blocking)
     threading.Thread(
         target=lambda: run_safe(analyze_2yr_all_pairs, "ANALYSIS"),
         daemon=True, name="ANALYSIS").start()
+    if not QUALIFIED_PAIRS and not os.path.exists(BT_RES_F):
+        threading.Thread(
+            target=lambda: run_safe(run_full_backtest, "BACKTEST_INIT"),
+            daemon=True, name="BACKTEST_INIT").start()
 
-    # 6 bulletproof threads
+    # 7 bulletproof threads
     for func, name in [
-        (mt5_keeper, "MT5_KEEPER"),
-        (scanner,    "SCANNER"),
-        (monitor,    "MONITOR"),
-        (evolution,  "EVOLUTION"),
-        (bot_loop,   "TELEGRAM"),
-        (heartbeat,  "HEARTBEAT"),
+        (mt5_keeper,            "MT5_KEEPER"),
+        (scanner,               "SCANNER"),
+        (monitor,               "MONITOR"),
+        (evolution,             "EVOLUTION"),
+        (bot_loop,              "TELEGRAM"),
+        (heartbeat,             "HEARTBEAT"),
+        (daily_backtest_update, "DAILY_UPDATE"),
     ]:
         threading.Thread(target=lambda f=func, n=name: run_safe(f, n),
                          daemon=True, name=name).start()
 
     time.sleep(3)
     with _mt5_lock: info = mt5.account_info()
-    tg(f"=== OMEGA REBUILD LIVE ===\n"
-       f"Balance: ${info.balance:.2f}\n"
-       f"Target: 20% profit\n"
-       f"18 pairs ranked\n"
-       f"1 trade max\n"
-       f"0.25-1% adaptive risk\n"
-       f"3 min scan\n"
-       f"Evolution: every 5 min\n"
-       f"All 6 threads bulletproof\n"
-       f"========================", urgent=True)
+    tg(f"=== OMEGA + AGGRESSIVE BACKTEST LIVE ===\n"
+       f"Balance: ${info.balance:.2f} | Target: 20%\n"
+       f"Qualified pairs: {len(QUALIFIED_PAIRS)}\n"
+       f"Filter: WR>=70% | RRR>=3.0 | Exp>=1.5\n"
+       f"18 pairs backtested (2yr H4)\n"
+       f"1 trade max | 0.25-1% adaptive risk\n"
+       f"Threads: 7 bulletproof\n"
+       f"Cmds: /backtest /qualified /report /stats\n"
+       f"=================================", urgent=True)
     _stamp("All threads started. Engine alive.")
 
     # Keep main thread alive

@@ -22,22 +22,22 @@
     "trades": 2,
     "wins": 0,
     "total_r": -1.1117228870787517,
-    "expectancy": -0.6733,
-    "win_rate": 8.2,
+    "expectancy": -0.6129,
+    "win_rate": 9.7,
     "rrr": 3.0,
-    "last_update": 1778934637.1262589
+    "last_update": 1778935563.80788
   },
   "XAGUSD": {
-    "expectancy": 0.078,
-    "win_rate": 26.9,
+    "expectancy": 0.3818,
+    "win_rate": 34.5,
     "rrr": 3.0,
-    "last_update": 1778934627.7603207
+    "last_update": 1778935557.8726351
   },
   "XPTUSD": {
-    "expectancy": -0.3642,
-    "win_rate": 15.9,
+    "expectancy": -0.2102,
+    "win_rate": 19.7,
     "rrr": 3.0,
-    "last_update": 1778934628.1951022
+    "last_update": 1778935558.456214
   },
   "GBPUSD": {
     "expectancy": -0.4162,
@@ -46,10 +46,10 @@
     "last_update": 1778934628.5603206
   },
   "EURUSD": {
-    "expectancy": -0.4625,
-    "win_rate": 13.4,
+    "expectancy": -0.4615,
+    "win_rate": 13.5,
     "rrr": 3.0,
-    "last_update": 1778934628.8744648
+    "last_update": 1778935559.5240371
   },
   "USDJPY": {
     "expectancy": -0.2814,
@@ -94,10 +94,10 @@
     "last_update": 1778934637.2375011
   },
   "AUDJPY": {
-    "expectancy": -0.5824,
-    "win_rate": 10.4,
+    "expectancy": -0.4217,
+    "win_rate": 14.5,
     "rrr": 3.0,
-    "last_update": 1778934637.3330717
+    "last_update": 1778935565.546541
   },
   "NZDJPY": {
     "expectancy": -0.609,
@@ -106,10 +106,10 @@
     "last_update": 1778934637.4529345
   },
   "BTCUSD": {
-    "expectancy": -0.3267,
-    "win_rate": 16.8,
+    "expectancy": 0.1429,
+    "win_rate": 28.6,
     "rrr": 3.0,
-    "last_update": 1778934637.6016498
+    "last_update": 1778935566.6783137
   },
   "ETHUSD": {
     "expectancy": -0.265,
