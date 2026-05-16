@@ -1,11 +1,11 @@
 {
-  "iteration": 389,
+  "iteration": 395,
   "best_wr": {
     "XAUUSD": 35.9,
     "USDJPY": 32.8,
     "GBPUSD": 31.9,
     "BTCUSD": 29.3,
-    "USDCAD": 38.3
+    "EURUSD": 28.5
   },
   "best_expectancy": {},
   "best_score": {
@@ -13,7 +13,7 @@
     "USDJPY": 0.40015999999999996,
     "GBPUSD": 0.44978999999999997,
     "BTCUSD": 0.36332,
-    "USDCAD": 0.7123799999999999
+    "EURUSD": 0.34199999999999997
   },
   "best_params": {
     "XAUUSD": {
@@ -88,19 +88,19 @@
       "min_confluence": 3,
       "version": 1
     },
-    "USDCAD": {
+    "EURUSD": {
       "ema_fast": 21,
       "ema_slow": 89,
       "rsi_period": 14,
-      "rsi_long_max": 60,
+      "rsi_long_max": 65,
       "rsi_short_min": 35,
       "atr_period": 14,
-      "sl_atr_mult": 0.5,
+      "sl_atr_mult": 0.6,
       "tp_rrr": 3.0,
       "trail_atr_mult": 1.5,
       "partial1_r": 1.5,
       "partial2_r": 2.5,
-      "min_adx": 30,
+      "min_adx": 15,
       "use_adx": true,
       "use_ema_stack": true,
       "min_confluence": 3,
@@ -172,7 +172,7 @@
       "min_adx": 30,
       "use_adx": true,
       "use_ema_stack": true,
-      "min_confluence": 3,
+      "min_confluence": 4,
       "version": 1
     },
     "BTCUSD": {
@@ -241,7 +241,7 @@
       "trail_atr_mult": 1.5,
       "partial1_r": 1.5,
       "partial2_r": 2.5,
-      "min_adx": 20,
+      "min_adx": 15,
       "use_adx": true,
       "use_ema_stack": true,
       "min_confluence": 3,
@@ -308,11 +308,10 @@
     "USDJPY": 1.22,
     "GBPUSD": 1.41,
     "BTCUSD": 1.24,
-    "USDCAD": 1.86
+    "EURUSD": 1.2
   },
   "pair_approved": {
-    "XAUUSD": true,
-    "USDCAD": true
+    "XAUUSD": true
   },
   "start_balance": 9999.87
 }
