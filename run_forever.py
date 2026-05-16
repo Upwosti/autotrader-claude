@@ -7,7 +7,7 @@ FTMO Demo: 1513410114 | FTMO-Demo
 Target: 20% profit | Safe buffers: 3% daily / 7% total DD
 """
 
-import os, sys, json, time, traceback, threading, queue, signal, gc, urllib.request
+import os, sys, json, time, traceback, threading, queue, signal, gc, urllib.request, uuid, random
 from datetime import datetime, timezone
 
 import numpy as np
@@ -77,53 +77,88 @@ def log_error(msg: str):
 def _stamp(msg: str):
     print(f"{datetime.utcnow().strftime('%H:%M:%S')} {msg}", flush=True)
 
-# ── Telegram (two sender threads: urgent + normal) ────────────────────────────
-bot = telebot.TeleBot(BOT_TOKEN, threaded=True) if BOT_TOKEN else None
-urgent_q: queue.Queue = queue.Queue()
-normal_q: queue.Queue = queue.Queue()
+# ── Telegram (unified queue + UUID dedup + 1s pacing + requeue on fail) ──────
+if not BOT_TOKEN or not CHAT_ID:
+    print("FATAL: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing from .env"); sys.exit(1)
+print(f"Telegram Token: {BOT_TOKEN[:20]}...")
+print(f"Chat ID: {CHAT_ID}")
 
-def _post(msg: str, timeout: int):
-    if not BOT_TOKEN or not CHAT_ID: return
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+try:
+    _me = bot.get_me()
+    print(f"Bot initialized: @{_me.username}")
+except Exception as e:
+    print(f"FATAL: Bot token invalid — {e}"); sys.exit(1)
+
+msg_queue: queue.Queue = queue.Queue(maxsize=1000)
+sent_ids: set = set()
+
+def telegram_sender():
+    """One dedicated thread. UUID dedup. 1s pacing. Requeue on failure."""
+    while True:
+        try:
+            data = msg_queue.get(timeout=2)
+            mid = data["id"]; text = data["text"]
+            if mid in sent_ids:
+                msg_queue.task_done(); continue
+            try:
+                r = requests.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={"chat_id": int(CHAT_ID), "text": text},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    sent_ids.add(mid)
+                    if len(sent_ids) > 500: sent_ids.clear()
+                elif r.status_code == 429:
+                    try: wait = int(r.json().get("parameters", {}).get("retry_after", 15))
+                    except Exception: wait = 15
+                    log_error(f"tg 429 — wait {wait}s, requeue")
+                    time.sleep(wait + 1)
+                    msg_queue.put(data)
+                else:
+                    log_error(f"tg HTTP {r.status_code}: {r.text[:120]}")
+                    msg_queue.put(data); time.sleep(2)
+            except requests.exceptions.Timeout:
+                log_error("tg timeout — requeue"); msg_queue.put(data); time.sleep(2)
+            except Exception as e:
+                log_error(f"tg send err: {e}"); msg_queue.put(data); time.sleep(2)
+            msg_queue.task_done()
+            time.sleep(1)  # rate-limit pacing
+        except queue.Empty:
+            continue
+        except Exception as e:
+            log_error(f"telegram_sender loop: {e}"); time.sleep(5)
+
+threading.Thread(target=telegram_sender, daemon=True, name="tg_sender").start()
+print("Telegram sender thread started")
+
+def tg(msg, urgent: bool = False) -> bool:
+    """Enqueue with UUID dedup. Returns immediately. urgent kept as flag for API compat."""
+    if not msg: return False
+    data = {"id": str(uuid.uuid4()), "text": str(msg)[:4096], "urgent": urgent}
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": str(msg)},
-            timeout=timeout,
-        )
+        msg_queue.put(data, timeout=1); return True
+    except queue.Full:
+        log_error("msg_queue full — clearing and retrying")
+        while not msg_queue.empty():
+            try: msg_queue.get_nowait()
+            except Exception: pass
+        try: msg_queue.put(data, timeout=1); return True
+        except Exception: return False
+
+def tg_urgent(msg) -> bool:
+    return tg(msg, urgent=True)
+
+def verify_telegram() -> bool:
+    print("\nVerifying Telegram setup...")
+    try: me = bot.get_me()
     except Exception as e:
-        log_error(f"tg_post: {e}")
-
-def urgent_sender():
-    while True:
-        try:
-            msg = urgent_q.get(timeout=1)
-            _post(msg, 5)
-            time.sleep(0.4)  # pacing to avoid 429
-        except queue.Empty:
-            continue
-        except Exception:
-            time.sleep(1)
-
-def normal_sender():
-    while True:
-        try:
-            msg = normal_q.get(timeout=2)
-            _post(msg, 10)
-            time.sleep(1)
-        except queue.Empty:
-            continue
-        except Exception:
-            time.sleep(2)
-
-def tg(msg, urgent: bool = False):
-    try:
-        (urgent_q if urgent else normal_q).put(str(msg))
-    except Exception:
-        pass
-
-# Start senders immediately
-threading.Thread(target=urgent_sender, daemon=True, name="tg_urgent").start()
-threading.Thread(target=normal_sender, daemon=True, name="tg_normal").start()
+        print(f"FAIL: bot token invalid — {e}"); return False
+    print(f"PASS: token valid (@{me.username}), chat {CHAT_ID}")
+    if not tg_urgent("OMEGA SYSTEM TEST — Telegram verified"):
+        print("FAIL: could not queue test"); return False
+    print("PASS: test queued\n"); return True
 
 # ── MT5 connection ────────────────────────────────────────────────────────────
 import MetaTrader5 as mt5
@@ -399,8 +434,9 @@ def backtest_aggressive(pair: str, df: pd.DataFrame) -> dict:
     min_rrr = float(np.min(rrrs))  if rrrs else 0.0
     max_rrr = float(np.max(rrrs))  if rrrs else 0.0
     expectancy = (wr/100 * avg_rrr) - ((1 - wr/100) * 1.0)
-    qualify = (total >= 20 and wr >= 70.0 and avg_rrr >= 3.0 and expectancy >= 1.5)
-    reason = "QUALIFIED" if qualify else f"WR={wr:.0f}% RRR={avg_rrr:.1f} Trades={total}"
+    # STRICT: 500+ trades, 70%+ WR, 3.0+ RRR, expectancy >= 1.5
+    qualify = (total >= 500 and wr >= 70.0 and avg_rrr >= 3.0 and expectancy >= 1.5)
+    reason = "QUALIFIED" if qualify else f"WR={wr:.0f}% RRR={avg_rrr:.1f} T={total}"
     return {
         "pair": pair, "total_trades": total, "wins": len(wins), "losses": total - len(wins),
         "win_rate": round(wr, 1), "avg_rrr": round(avg_rrr, 2),
@@ -431,9 +467,9 @@ def send_backtest_report(results: dict, qualified: list):
         tg("No backtest results", urgent=True); return
     total = len(results); qcount = len(qualified)
     # PART 1 summary
-    tg("=== 2-YEAR BACKTEST REPORT ===\n"
+    tg("=== AGGRESSIVE BACKTEST REPORT ===\n"
        f"Pairs tested: {total}/18 | Qualified: {qcount}\n"
-       f"Criteria: WR>=70% | RRR>=3.0 | Exp>=1.5 | Trades>=20", urgent=True)
+       f"Criteria: WR>=70% | RRR>=3.0 | Exp>=1.5 | Trades>=500", urgent=True)
     # PART 2 qualified
     if qualified:
         msg = "=== QUALIFIED (TRADE THESE) ===\n"
@@ -473,12 +509,16 @@ def send_backtest_report(results: dict, qualified: list):
 
 def run_full_backtest():
     global QUALIFIED_PAIRS
-    tg("Starting FULL 2-year aggressive backtest on 18 pairs (70%+ WR / 3+ RRR filter)...", urgent=True)
+    tg("Starting FULL aggressive backtest on 18 pairs (500+ trades, 70%+ WR, 3+ RRR)...", urgent=True)
     results = {}; qualified = []
     for i, pair in enumerate(PAIRS_18):
         try:
-            tg(f"[{i+1}/18] Testing {pair}...")
-            df = get_data(pair, "H4", 3500)
+            tg(f"[{i+1}/18] Testing {pair} on M15...")
+            # M15 first (~50k bars → many setups), fall back to H1/H4
+            df = None
+            for tf, want in [("M15", 50000), ("H1", 20000), ("H4", 5000)]:
+                df = get_data(pair, tf, want)
+                if df is not None and len(df) >= 500: break
             if df is None or len(df) < 500:
                 tg(f"[X] {pair}: insufficient data")
                 continue
@@ -876,18 +916,11 @@ def scanner():
             if not check_limits(): time.sleep(3600); continue
             with _mt5_lock: positions = mt5.positions_get() or []
             if len(positions) >= LIMITS["MAX_OPEN_TRADES"]: time.sleep(60); continue
-            # Priority 1: QUALIFIED pairs (70%+ WR, 3+ RRR backtest)
-            # Priority 2: top-10 by rank_score from 2yr analysis
-            # Priority 3: first 10 of PAIRS_18
-            if QUALIFIED_PAIRS:
-                candidates = QUALIFIED_PAIRS[:10]
-            else:
-                analysis = load_analysis()
-                if analysis:
-                    ranked = sorted(analysis.items(), key=lambda x: x[1].get("rank_score", 0), reverse=True)
-                    candidates = [p for p, _ in ranked[:10]]
-                else:
-                    candidates = PAIRS_18[:10]
+            # STRICT GATE: trade ONLY pairs that have qualified (70% WR / 3R RRR / 500+ trades)
+            if not QUALIFIED_PAIRS:
+                # Be silent — evolution is still searching. Idle 5 min.
+                time.sleep(300); continue
+            candidates = QUALIFIED_PAIRS[:10]
             best = None; best_conf = 0
             for pair in candidates:
                 try:
@@ -907,33 +940,138 @@ def scanner():
         except Exception as e:
             log_error(f"scanner: {e}"); time.sleep(60)
 
-# ── Evolution ────────────────────────────────────────────────────────────────
+# ── Evolution (parameter search aiming for 70%/3R/500-trade qualification) ───
+# Parameter mutation space — each backtest_aggressive run picks one combination
+EVO_PARAM_SPACE = {
+    "adx_min":         [22, 25, 28, 32, 36],
+    "rsi_long_min":    [50, 55, 60],
+    "rsi_long_max":    [70, 75, 80],
+    "rsi_short_min":   [20, 25, 30],
+    "rsi_short_max":   [40, 45, 50],
+    "pullback_atr":    [0.5, 0.8, 1.2, 1.6],
+    "vol_mult":        [1.0, 1.2, 1.5, 2.0],
+    "candle_confirm":  [1, 2, 3],   # of last 3 candles
+    "sl_buffer_atr":   [0.2, 0.3, 0.5],
+    "min_sl_atr":      [0.3, 0.5, 0.7],
+    "max_sl_atr":      [3.0, 4.0, 5.0],
+}
+
+def _rand_params() -> dict:
+    return {k: random.choice(v) for k, v in EVO_PARAM_SPACE.items()}
+
+def backtest_aggressive_params(pair: str, df: pd.DataFrame, p: dict) -> dict:
+    """Same logic as backtest_aggressive but parameters injected for mutation."""
+    close = df['close'].values; high = df['high'].values; low = df['low'].values
+    opens = df['open'].values
+    vol = df['tick_volume'].values if 'tick_volume' in df.columns else np.ones(len(close))
+    n = len(close)
+    if n < 350:
+        return {"pair":pair,"total_trades":0,"win_rate":0,"avg_rrr":0,"expectancy":0,"qualify":False,"reason":"insuff"}
+    atr_v=calc_atr(high,low,close,14); ema20=calc_ema(close,20); ema50=calc_ema(close,50)
+    ema200=calc_ema(close,200); adx_v=calc_adx(high,low,close,14); rsi_v=calc_rsi(close,14)
+    trades=[]; pos=0; entry=0.0; sl=0.0; sl_d=0.0
+    for i in range(300, n - 50):
+        if pos == 0:
+            if (close[i]>ema20[i]>ema50[i]>ema200[i] and
+                p["rsi_long_min"]<rsi_v[i]<p["rsi_long_max"] and adx_v[i]>p["adx_min"]):
+                bias=1
+            elif (close[i]<ema20[i]<ema50[i]<ema200[i] and
+                  p["rsi_short_min"]<rsi_v[i]<p["rsi_short_max"] and adx_v[i]>p["adx_min"]):
+                bias=-1
+            else: continue
+            if abs(close[i]-ema20[i]) > atr_v[i]*p["pullback_atr"]: continue
+            va = float(np.mean(vol[max(0,i-20):i])) if i>=20 else 0
+            if va<=0 or vol[i] < va*p["vol_mult"]: continue
+            if bias==1:
+                if sum(1 for j in range(i-2,i+1) if close[j]>opens[j]) < p["candle_confirm"]: continue
+            else:
+                if sum(1 for j in range(i-2,i+1) if close[j]<opens[j]) < p["candle_confirm"]: continue
+            entry=close[i]; atr_now=atr_v[i]
+            if bias==1: sl = float(np.min(low[i-20:i])) - atr_now*p["sl_buffer_atr"]
+            else:       sl = float(np.max(high[i-20:i])) + atr_now*p["sl_buffer_atr"]
+            sl_d=abs(entry-sl)
+            if sl_d < atr_now*p["min_sl_atr"] or sl_d > atr_now*p["max_sl_atr"]: continue
+            pos=bias; continue
+        if pos==1:
+            if low[i]<=sl: trades.append({"win":False,"rrr":0}); pos=0; continue
+            r=(close[i]-entry)/sl_d
+            if r>=15: trades.append({"win":True,"rrr":15}); pos=0; continue
+            if r>=10: trades.append({"win":True,"rrr":10}); pos=0; continue
+            if r>=5 and adx_v[i]<22: trades.append({"win":True,"rrr":5}); pos=0; continue
+            if r>=3 and close[i]<ema50[i]: trades.append({"win":True,"rrr":3}); pos=0; continue
+        else:
+            if high[i]>=sl: trades.append({"win":False,"rrr":0}); pos=0; continue
+            r=(entry-close[i])/sl_d
+            if r>=15: trades.append({"win":True,"rrr":15}); pos=0; continue
+            if r>=10: trades.append({"win":True,"rrr":10}); pos=0; continue
+            if r>=5 and adx_v[i]<22: trades.append({"win":True,"rrr":5}); pos=0; continue
+            if r>=3 and close[i]>ema50[i]: trades.append({"win":True,"rrr":3}); pos=0; continue
+    total = len(trades)
+    if total == 0:
+        return {"pair":pair,"total_trades":0,"win_rate":0,"avg_rrr":0,"expectancy":0,"qualify":False,"reason":"no_trades"}
+    wins=[t for t in trades if t["win"]]; wr=len(wins)/total*100
+    rrrs=[t["rrr"] for t in wins]
+    avg_rrr=float(np.mean(rrrs)) if rrrs else 0.0
+    exp=(wr/100*avg_rrr)-((1-wr/100)*1.0)
+    # STRICT qualification: 70%+ WR, 3.0+ RRR, expectancy >= 1.5, 500+ trades
+    qualify = (total >= 500 and wr >= 70.0 and avg_rrr >= 3.0 and exp >= 1.5)
+    reason = "QUALIFIED" if qualify else f"WR={wr:.0f}% RRR={avg_rrr:.1f} T={total}"
+    return {"pair":pair, "total_trades":total, "win_rate":round(wr,1),
+            "avg_rrr":round(avg_rrr,2), "expectancy":round(exp,3),
+            "qualify":qualify, "reason":reason, "params": p}
+
 def evolution():
+    """ML-style random parameter search per pair. Goal: 500+ trades, 70% WR, 3R RRR.
+    Uses M15 data for ~50k bars (much more setups than H4). Saves best params per pair.
+    """
     iteration = load_state().get("iteration", 0)
     while True:
         try:
             for pair in PAIRS_18:
                 try:
-                    df = get_data(pair, "H4", 1000)
-                    if df is None or len(df) < 200: continue
-                    stats = run_backtest_vectorized(pair, df)
+                    # M15 for many trades — fallback H1 → H4 if M15 unavailable
+                    df = None
+                    for tf, want in [("M15", 50000), ("H1", 20000), ("H4", 5000)]:
+                        df = get_data(pair, tf, want)
+                        if df is not None and len(df) >= 500: break
+                    if df is None or len(df) < 500: continue
+
                     profiles = load_profiles()
-                    p = profiles.get(pair, {})
-                    if stats["expectancy"] > p.get("expectancy", -999):
-                        p["expectancy"] = stats["expectancy"]
-                        p["win_rate"] = stats["win_rate"]
-                        p["rrr"] = stats["avg_rrr"]
-                        p["last_update"] = time.time()
-                        profiles[pair] = p
-                        save_profiles(profiles)
+                    p_state = profiles.get(pair, {})
+                    best_exp = p_state.get("expectancy", -999)
+
+                    # Try 5 random parameter sets per cycle
+                    for _ in range(5):
+                        params = _rand_params()
+                        r = backtest_aggressive_params(pair, df, params)
+                        if r["expectancy"] > best_exp:
+                            best_exp = r["expectancy"]
+                            p_state.update({
+                                "expectancy": r["expectancy"], "win_rate": r["win_rate"],
+                                "rrr": r["avg_rrr"], "total_trades": r["total_trades"],
+                                "qualify": r["qualify"], "best_params": params,
+                                "last_update": time.time(),
+                            })
+                            profiles[pair] = p_state
+                            save_profiles(profiles)
+                            if r["qualify"]:
+                                # Promote to QUALIFIED_PAIRS
+                                load_qualified()
+                                if pair not in QUALIFIED_PAIRS:
+                                    QUALIFIED_PAIRS.append(pair)
+                                    save_backtest_results(load_backtest_results() | {pair: r}, QUALIFIED_PAIRS)
+                                    tg(f"PAIR QUALIFIED: {pair} | WR {r['win_rate']:.1f}% "
+                                       f"RRR {r['avg_rrr']:.2f} T={r['total_trades']} Exp {r['expectancy']:.3f}", urgent=True)
                     gc.collect()
-                except Exception: continue
+                except Exception as e:
+                    log_error(f"evolve {pair}: {e}")
+                    continue
             iteration += 1
             state = load_state(); state["iteration"] = iteration; save_state(state)
             if iteration % 20 == 0: send_evolution_report(iteration)
-            time.sleep(300)
+            time.sleep(60)
         except Exception as e:
-            log_error(f"evolution: {e}"); time.sleep(60)
+            log_error(f"evolution loop: {e}"); time.sleep(60)
 
 def send_evolution_report(iteration: int):
     profiles = load_profiles()
@@ -1219,6 +1357,8 @@ if __name__ == "__main__":
     except AttributeError: pass
 
     _stamp("OMEGA starting...")
+    if not verify_telegram():
+        _stamp("Telegram verification failed — EXIT"); sys.exit(1)
     while not mt5_connect():
         _stamp("MT5 connect retry in 30s...")
         time.sleep(30)
@@ -1258,14 +1398,16 @@ if __name__ == "__main__":
 
     time.sleep(3)
     with _mt5_lock: info = mt5.account_info()
-    tg(f"=== OMEGA + AGGRESSIVE BACKTEST LIVE ===\n"
+    tg(f"=== OMEGA + ML EVOLUTION LIVE ===\n"
        f"Balance: ${info.balance:.2f} | Target: 20%\n"
        f"Qualified pairs: {len(QUALIFIED_PAIRS)}\n"
-       f"Filter: WR>=70% | RRR>=3.0 | Exp>=1.5\n"
-       f"18 pairs backtested (2yr H4)\n"
-       f"1 trade max | 0.25-1% adaptive risk\n"
+       f"GATE: WR>=70% | RRR>=3.0 | Trades>=500\n"
+       f"Evolution: random param search per pair\n"
+       f"Live trades: ONLY qualified pairs\n"
+       f"Data: M15 (~50k bars) -> H1 -> H4 fallback\n"
+       f"Telegram: unified queue + UUID dedup + 1s pacing\n"
        f"Threads: 7 bulletproof\n"
-       f"Cmds: /backtest /qualified /report /stats\n"
+       f"Cmds: /backtest /qualified /report /stats /evolution\n"
        f"=================================", urgent=True)
     _stamp("All threads started. Engine alive.")
 

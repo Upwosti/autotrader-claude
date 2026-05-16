@@ -28,46 +28,151 @@
     "last_update": 1778935563.80788
   },
   "XAGUSD": {
-    "expectancy": 0.3818,
-    "win_rate": 34.5,
-    "rrr": 3.0,
-    "last_update": 1778935557.8726351
+    "expectancy": 1.4,
+    "win_rate": 40.0,
+    "rrr": 5.0,
+    "last_update": 1778953200.4249926,
+    "total_trades": 5,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 25,
+      "rsi_long_min": 55,
+      "rsi_long_max": 75,
+      "rsi_short_min": 20,
+      "rsi_short_max": 40,
+      "pullback_atr": 0.5,
+      "vol_mult": 1.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.5,
+      "max_sl_atr": 4.0
+    }
   },
   "XPTUSD": {
-    "expectancy": -0.2102,
-    "win_rate": 19.7,
+    "expectancy": 0.429,
+    "win_rate": 35.7,
     "rrr": 3.0,
-    "last_update": 1778935558.456214
+    "last_update": 1778953206.9003522,
+    "total_trades": 14,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 22,
+      "rsi_long_min": 55,
+      "rsi_long_max": 70,
+      "rsi_short_min": 30,
+      "rsi_short_max": 40,
+      "pullback_atr": 1.2,
+      "vol_mult": 2.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.3,
+      "max_sl_atr": 5.0
+    }
   },
   "GBPUSD": {
-    "expectancy": -0.4162,
-    "win_rate": 14.6,
-    "rrr": 3.0,
-    "last_update": 1778934628.5603206
+    "expectancy": 0.214,
+    "win_rate": 22.9,
+    "rrr": 4.31,
+    "last_update": 1778953212.2750385,
+    "total_trades": 70,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 28,
+      "rsi_long_min": 55,
+      "rsi_long_max": 75,
+      "rsi_short_min": 30,
+      "rsi_short_max": 45,
+      "pullback_atr": 1.2,
+      "vol_mult": 1.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 4.0
+    }
   },
   "EURUSD": {
-    "expectancy": -0.4615,
-    "win_rate": 13.5,
-    "rrr": 3.0,
-    "last_update": 1778935559.5240371
+    "expectancy": -0.043,
+    "win_rate": 19.6,
+    "rrr": 3.89,
+    "last_update": 1778953216.4483037,
+    "total_trades": 46,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 36,
+      "rsi_long_min": 60,
+      "rsi_long_max": 80,
+      "rsi_short_min": 20,
+      "rsi_short_max": 45,
+      "pullback_atr": 1.2,
+      "vol_mult": 1.5,
+      "candle_confirm": 1,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.3,
+      "max_sl_atr": 3.0
+    }
   },
   "USDJPY": {
-    "expectancy": -0.2814,
-    "win_rate": 18.0,
-    "rrr": 3.0,
-    "last_update": 1778934629.1555471
+    "expectancy": 0.273,
+    "win_rate": 27.3,
+    "rrr": 3.67,
+    "last_update": 1778953220.474236,
+    "total_trades": 11,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 36,
+      "rsi_long_min": 55,
+      "rsi_long_max": 75,
+      "rsi_short_min": 30,
+      "rsi_short_max": 40,
+      "pullback_atr": 0.8,
+      "vol_mult": 2.0,
+      "candle_confirm": 1,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 4.0
+    }
   },
   "USDCHF": {
-    "expectancy": -0.3828,
+    "expectancy": -0.038,
     "win_rate": 15.4,
-    "rrr": 3.0,
-    "last_update": 1778934631.6398294
+    "rrr": 5.25,
+    "last_update": 1778953224.8923197,
+    "total_trades": 26,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 32,
+      "rsi_long_min": 60,
+      "rsi_long_max": 70,
+      "rsi_short_min": 30,
+      "rsi_short_max": 40,
+      "pullback_atr": 1.6,
+      "vol_mult": 1.2,
+      "candle_confirm": 2,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.5,
+      "max_sl_atr": 3.0
+    }
   },
   "AUDUSD": {
-    "expectancy": -0.6475,
-    "win_rate": 8.8,
-    "rrr": 3.0,
-    "last_update": 1778934636.3161569
+    "expectancy": 0.0,
+    "win_rate": 19.7,
+    "rrr": 4.07,
+    "last_update": 1778953230.3358047,
+    "total_trades": 137,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 25,
+      "rsi_long_min": 60,
+      "rsi_long_max": 75,
+      "rsi_short_min": 20,
+      "rsi_short_max": 45,
+      "pullback_atr": 1.6,
+      "vol_mult": 1.0,
+      "candle_confirm": 2,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.3,
+      "max_sl_atr": 3.0
+    }
   },
   "NZDUSD": {
     "expectancy": -0.5694,
