@@ -8,10 +8,25 @@
     "trades": 1,
     "wins": 0,
     "total_r": -0.10121293582290164,
-    "expectancy": 0.3628,
-    "win_rate": 34.1,
-    "rrr": 3.0,
-    "last_update": 1778934627.4600306
+    "expectancy": 1.136,
+    "win_rate": 36.4,
+    "rrr": 4.88,
+    "last_update": 1778953326.5974462,
+    "total_trades": 22,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 28,
+      "rsi_long_min": 55,
+      "rsi_long_max": 75,
+      "rsi_short_min": 30,
+      "rsi_short_max": 45,
+      "pullback_atr": 1.6,
+      "vol_mult": 1.2,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.5,
+      "max_sl_atr": 3.0
+    }
   },
   "GBPJPY": {
     "sweep": 1.0,
@@ -22,44 +37,332 @@
     "trades": 2,
     "wins": 0,
     "total_r": -1.1117228870787517,
-    "expectancy": -0.6129,
-    "win_rate": 9.7,
-    "rrr": 3.0,
-    "last_update": 1778935563.80788
-  },
-  "XAGUSD": {
-    "expectancy": 1.4,
+    "expectancy": 1.0,
     "win_rate": 40.0,
-    "rrr": 5.0,
-    "last_update": 1778953200.4249926,
+    "rrr": 4.0,
+    "last_update": 1778953804.6913786,
     "total_trades": 5,
-    "qualify": false,
-    "best_params": {
-      "adx_min": 25,
-      "rsi_long_min": 55,
-      "rsi_long_max": 75,
-      "rsi_short_min": 20,
-      "rsi_short_max": 40,
-      "pullback_atr": 0.5,
-      "vol_mult": 1.0,
-      "candle_confirm": 3,
-      "sl_buffer_atr": 0.5,
-      "min_sl_atr": 0.5,
-      "max_sl_atr": 4.0
-    }
-  },
-  "XPTUSD": {
-    "expectancy": 0.429,
-    "win_rate": 35.7,
-    "rrr": 3.0,
-    "last_update": 1778953206.9003522,
-    "total_trades": 14,
     "qualify": false,
     "best_params": {
       "adx_min": 22,
       "rsi_long_min": 55,
       "rsi_long_max": 70,
+      "rsi_short_min": 25,
+      "rsi_short_max": 40,
+      "pullback_atr": 0.8,
+      "vol_mult": 2.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.2,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 4.0
+    }
+  },
+  "XAGUSD": {
+    "expectancy": 5.0,
+    "win_rate": 100.0,
+    "rrr": 5.0,
+    "last_update": 1778953756.4144964,
+    "total_trades": 1,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 32,
+      "rsi_long_min": 55,
+      "rsi_long_max": 75,
+      "rsi_short_min": 25,
+      "rsi_short_max": 40,
+      "pullback_atr": 0.5,
+      "vol_mult": 1.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.3,
+      "max_sl_atr": 3.0
+    }
+  },
+  "XPTUSD": {
+    "expectancy": 1.75,
+    "win_rate": 25.0,
+    "rrr": 10.0,
+    "last_update": 1778953330.6503992,
+    "total_trades": 4,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 22,
+      "rsi_long_min": 55,
+      "rsi_long_max": 70,
+      "rsi_short_min": 20,
+      "rsi_short_max": 40,
+      "pullback_atr": 0.5,
+      "vol_mult": 1.2,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.5,
+      "max_sl_atr": 3.0
+    }
+  },
+  "GBPUSD": {
+    "expectancy": 0.225,
+    "win_rate": 22.5,
+    "rrr": 4.44,
+    "last_update": 1778953540.040976,
+    "total_trades": 71,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 22,
+      "rsi_long_min": 55,
+      "rsi_long_max": 75,
+      "rsi_short_min": 20,
+      "rsi_short_max": 45,
+      "pullback_atr": 1.2,
+      "vol_mult": 1.2,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.2,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 3.0
+    }
+  },
+  "EURUSD": {
+    "expectancy": 1.75,
+    "win_rate": 50.0,
+    "rrr": 4.5,
+    "last_update": 1778953336.3749075,
+    "total_trades": 8,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 36,
+      "rsi_long_min": 60,
+      "rsi_long_max": 80,
+      "rsi_short_min": 25,
+      "rsi_short_max": 40,
+      "pullback_atr": 0.8,
+      "vol_mult": 1.0,
+      "candle_confirm": 2,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 5.0
+    }
+  },
+  "USDJPY": {
+    "expectancy": 2.0,
+    "win_rate": 50.0,
+    "rrr": 5.0,
+    "last_update": 1778953657.6322763,
+    "total_trades": 4,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 36,
+      "rsi_long_min": 55,
+      "rsi_long_max": 70,
       "rsi_short_min": 30,
+      "rsi_short_max": 45,
+      "pullback_atr": 0.8,
+      "vol_mult": 2.0,
+      "candle_confirm": 2,
+      "sl_buffer_atr": 0.2,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 3.0
+    }
+  },
+  "USDCHF": {
+    "expectancy": 0.179,
+    "win_rate": 25.6,
+    "rrr": 3.6,
+    "last_update": 1778953341.8125288,
+    "total_trades": 39,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 22,
+      "rsi_long_min": 55,
+      "rsi_long_max": 80,
+      "rsi_short_min": 30,
+      "rsi_short_max": 45,
+      "pullback_atr": 1.2,
+      "vol_mult": 1.5,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.5,
+      "max_sl_atr": 3.0
+    }
+  },
+  "AUDUSD": {
+    "expectancy": 1.0,
+    "win_rate": 50.0,
+    "rrr": 3.0,
+    "last_update": 1778953446.6960769,
+    "total_trades": 2,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 36,
+      "rsi_long_min": 60,
+      "rsi_long_max": 70,
+      "rsi_short_min": 25,
+      "rsi_short_max": 40,
+      "pullback_atr": 1.6,
+      "vol_mult": 1.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 3.0
+    }
+  },
+  "NZDUSD": {
+    "expectancy": 0.618,
+    "win_rate": 32.7,
+    "rrr": 3.94,
+    "last_update": 1778953233.609504,
+    "total_trades": 55,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 22,
+      "rsi_long_min": 60,
+      "rsi_long_max": 80,
+      "rsi_short_min": 25,
+      "rsi_short_max": 45,
+      "pullback_atr": 1.2,
+      "vol_mult": 1.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.5,
+      "max_sl_atr": 3.0
+    }
+  },
+  "USDCAD": {
+    "expectancy": 0.286,
+    "win_rate": 28.6,
+    "rrr": 3.5,
+    "last_update": 1778953668.8456423,
+    "total_trades": 14,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 36,
+      "rsi_long_min": 50,
+      "rsi_long_max": 70,
+      "rsi_short_min": 30,
+      "rsi_short_max": 45,
+      "pullback_atr": 1.2,
+      "vol_mult": 2.0,
+      "candle_confirm": 2,
+      "sl_buffer_atr": 0.2,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 3.0
+    }
+  },
+  "EURJPY": {
+    "expectancy": 2.333,
+    "win_rate": 66.7,
+    "rrr": 4.0,
+    "last_update": 1778953563.552219,
+    "total_trades": 3,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 28,
+      "rsi_long_min": 55,
+      "rsi_long_max": 80,
+      "rsi_short_min": 20,
+      "rsi_short_max": 50,
+      "pullback_atr": 1.6,
+      "vol_mult": 2.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.3,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 3.0
+    }
+  },
+  "EURGBP": {
+    "expectancy": 0.2,
+    "win_rate": 20.0,
+    "rrr": 5.0,
+    "last_update": 1778953457.5245662,
+    "total_trades": 10,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 25,
+      "rsi_long_min": 55,
+      "rsi_long_max": 80,
+      "rsi_short_min": 20,
+      "rsi_short_max": 40,
+      "pullback_atr": 0.8,
+      "vol_mult": 1.5,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.3,
+      "max_sl_atr": 4.0
+    }
+  },
+  "AUDJPY": {
+    "expectancy": 1.2,
+    "win_rate": 20.0,
+    "rrr": 10.0,
+    "last_update": 1778953357.967895,
+    "total_trades": 5,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 36,
+      "rsi_long_min": 60,
+      "rsi_long_max": 80,
+      "rsi_short_min": 25,
+      "rsi_short_max": 45,
+      "pullback_atr": 0.5,
+      "vol_mult": 1.2,
+      "candle_confirm": 2,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 3.0
+    }
+  },
+  "NZDJPY": {
+    "expectancy": 1.286,
+    "win_rate": 42.9,
+    "rrr": 4.33,
+    "last_update": 1778953684.1275911,
+    "total_trades": 7,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 32,
+      "rsi_long_min": 55,
+      "rsi_long_max": 70,
+      "rsi_short_min": 25,
+      "rsi_short_max": 45,
+      "pullback_atr": 0.8,
+      "vol_mult": 1.0,
+      "candle_confirm": 3,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 3.0
+    }
+  },
+  "BTCUSD": {
+    "expectancy": 1.077,
+    "win_rate": 30.8,
+    "rrr": 5.75,
+    "last_update": 1778953815.6115565,
+    "total_trades": 13,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 25,
+      "rsi_long_min": 55,
+      "rsi_long_max": 80,
+      "rsi_short_min": 20,
+      "rsi_short_max": 45,
+      "pullback_atr": 0.5,
+      "vol_mult": 1.5,
+      "candle_confirm": 2,
+      "sl_buffer_atr": 0.5,
+      "min_sl_atr": 0.7,
+      "max_sl_atr": 3.0
+    }
+  },
+  "ETHUSD": {
+    "expectancy": 2.0,
+    "win_rate": 40.0,
+    "rrr": 6.5,
+    "last_update": 1778953264.147123,
+    "total_trades": 5,
+    "qualify": false,
+    "best_params": {
+      "adx_min": 32,
+      "rsi_long_min": 55,
+      "rsi_long_max": 80,
+      "rsi_short_min": 25,
       "rsi_short_max": 40,
       "pullback_atr": 1.2,
       "vol_mult": 2.0,
@@ -68,158 +371,5 @@
       "min_sl_atr": 0.3,
       "max_sl_atr": 5.0
     }
-  },
-  "GBPUSD": {
-    "expectancy": 0.214,
-    "win_rate": 22.9,
-    "rrr": 4.31,
-    "last_update": 1778953212.2750385,
-    "total_trades": 70,
-    "qualify": false,
-    "best_params": {
-      "adx_min": 28,
-      "rsi_long_min": 55,
-      "rsi_long_max": 75,
-      "rsi_short_min": 30,
-      "rsi_short_max": 45,
-      "pullback_atr": 1.2,
-      "vol_mult": 1.0,
-      "candle_confirm": 3,
-      "sl_buffer_atr": 0.3,
-      "min_sl_atr": 0.7,
-      "max_sl_atr": 4.0
-    }
-  },
-  "EURUSD": {
-    "expectancy": -0.043,
-    "win_rate": 19.6,
-    "rrr": 3.89,
-    "last_update": 1778953216.4483037,
-    "total_trades": 46,
-    "qualify": false,
-    "best_params": {
-      "adx_min": 36,
-      "rsi_long_min": 60,
-      "rsi_long_max": 80,
-      "rsi_short_min": 20,
-      "rsi_short_max": 45,
-      "pullback_atr": 1.2,
-      "vol_mult": 1.5,
-      "candle_confirm": 1,
-      "sl_buffer_atr": 0.3,
-      "min_sl_atr": 0.3,
-      "max_sl_atr": 3.0
-    }
-  },
-  "USDJPY": {
-    "expectancy": 0.273,
-    "win_rate": 27.3,
-    "rrr": 3.67,
-    "last_update": 1778953220.474236,
-    "total_trades": 11,
-    "qualify": false,
-    "best_params": {
-      "adx_min": 36,
-      "rsi_long_min": 55,
-      "rsi_long_max": 75,
-      "rsi_short_min": 30,
-      "rsi_short_max": 40,
-      "pullback_atr": 0.8,
-      "vol_mult": 2.0,
-      "candle_confirm": 1,
-      "sl_buffer_atr": 0.5,
-      "min_sl_atr": 0.7,
-      "max_sl_atr": 4.0
-    }
-  },
-  "USDCHF": {
-    "expectancy": -0.038,
-    "win_rate": 15.4,
-    "rrr": 5.25,
-    "last_update": 1778953224.8923197,
-    "total_trades": 26,
-    "qualify": false,
-    "best_params": {
-      "adx_min": 32,
-      "rsi_long_min": 60,
-      "rsi_long_max": 70,
-      "rsi_short_min": 30,
-      "rsi_short_max": 40,
-      "pullback_atr": 1.6,
-      "vol_mult": 1.2,
-      "candle_confirm": 2,
-      "sl_buffer_atr": 0.5,
-      "min_sl_atr": 0.5,
-      "max_sl_atr": 3.0
-    }
-  },
-  "AUDUSD": {
-    "expectancy": 0.0,
-    "win_rate": 19.7,
-    "rrr": 4.07,
-    "last_update": 1778953230.3358047,
-    "total_trades": 137,
-    "qualify": false,
-    "best_params": {
-      "adx_min": 25,
-      "rsi_long_min": 60,
-      "rsi_long_max": 75,
-      "rsi_short_min": 20,
-      "rsi_short_max": 45,
-      "pullback_atr": 1.6,
-      "vol_mult": 1.0,
-      "candle_confirm": 2,
-      "sl_buffer_atr": 0.3,
-      "min_sl_atr": 0.3,
-      "max_sl_atr": 3.0
-    }
-  },
-  "NZDUSD": {
-    "expectancy": -0.5694,
-    "win_rate": 10.8,
-    "rrr": 3.0,
-    "last_update": 1778934636.6372855
-  },
-  "USDCAD": {
-    "expectancy": -0.3704,
-    "win_rate": 15.7,
-    "rrr": 3.0,
-    "last_update": 1778934636.8670735
-  },
-  "EURJPY": {
-    "expectancy": -0.499,
-    "win_rate": 12.5,
-    "rrr": 3.0,
-    "last_update": 1778934636.9871547
-  },
-  "EURGBP": {
-    "expectancy": -0.7857,
-    "win_rate": 5.4,
-    "rrr": 3.0,
-    "last_update": 1778934637.2375011
-  },
-  "AUDJPY": {
-    "expectancy": -0.4217,
-    "win_rate": 14.5,
-    "rrr": 3.0,
-    "last_update": 1778935565.546541
-  },
-  "NZDJPY": {
-    "expectancy": -0.609,
-    "win_rate": 9.8,
-    "rrr": 3.0,
-    "last_update": 1778934637.4529345
-  },
-  "BTCUSD": {
-    "expectancy": 0.1429,
-    "win_rate": 28.6,
-    "rrr": 3.0,
-    "last_update": 1778935566.6783137
-  },
-  "ETHUSD": {
-    "expectancy": -0.265,
-    "win_rate": 18.4,
-    "rrr": 3.0,
-    "last_update": 1778934637.7422736
   }
 }
