@@ -1,0 +1,121 @@
+{
+  "XAUUSD": {
+    "win_rate": 34.1,
+    "avg_rrr": 3.0,
+    "expectancy": 0.3628,
+    "total_trades": 452,
+    "rank_score": 3.628
+  },
+  "XAGUSD": {
+    "win_rate": 26.9,
+    "avg_rrr": 3.0,
+    "expectancy": 0.078,
+    "total_trades": 590,
+    "rank_score": 0.78
+  },
+  "XPTUSD": {
+    "win_rate": 15.9,
+    "avg_rrr": 3.0,
+    "expectancy": -0.3642,
+    "total_trades": 497,
+    "rank_score": -3.642
+  },
+  "GBPUSD": {
+    "win_rate": 14.6,
+    "avg_rrr": 3.0,
+    "expectancy": -0.4162,
+    "total_trades": 507,
+    "rank_score": -4.162
+  },
+  "EURUSD": {
+    "win_rate": 13.4,
+    "avg_rrr": 3.0,
+    "expectancy": -0.4625,
+    "total_trades": 506,
+    "rank_score": -4.625
+  },
+  "USDJPY": {
+    "win_rate": 18.0,
+    "avg_rrr": 3.0,
+    "expectancy": -0.2814,
+    "total_trades": 501,
+    "rank_score": -2.814
+  },
+  "USDCHF": {
+    "win_rate": 15.4,
+    "avg_rrr": 3.0,
+    "expectancy": -0.3828,
+    "total_trades": 499,
+    "rank_score": -3.828
+  },
+  "AUDUSD": {
+    "win_rate": 8.8,
+    "avg_rrr": 3.0,
+    "expectancy": -0.6475,
+    "total_trades": 556,
+    "rank_score": -6.475
+  },
+  "NZDUSD": {
+    "win_rate": 10.8,
+    "avg_rrr": 3.0,
+    "expectancy": -0.5694,
+    "total_trades": 576,
+    "rank_score": -5.694
+  },
+  "USDCAD": {
+    "win_rate": 15.7,
+    "avg_rrr": 3.0,
+    "expectancy": -0.3704,
+    "total_trades": 521,
+    "rank_score": -3.704
+  },
+  "EURJPY": {
+    "win_rate": 12.5,
+    "avg_rrr": 3.0,
+    "expectancy": -0.499,
+    "total_trades": 487,
+    "rank_score": -4.99
+  },
+  "GBPJPY": {
+    "win_rate": 8.2,
+    "avg_rrr": 3.0,
+    "expectancy": -0.6733,
+    "total_trades": 502,
+    "rank_score": -6.733
+  },
+  "EURGBP": {
+    "win_rate": 5.4,
+    "avg_rrr": 3.0,
+    "expectancy": -0.7857,
+    "total_trades": 560,
+    "rank_score": -7.857
+  },
+  "AUDJPY": {
+    "win_rate": 10.4,
+    "avg_rrr": 3.0,
+    "expectancy": -0.5824,
+    "total_trades": 431,
+    "rank_score": -5.824
+  },
+  "NZDJPY": {
+    "win_rate": 9.8,
+    "avg_rrr": 3.0,
+    "expectancy": -0.609,
+    "total_trades": 532,
+    "rank_score": -6.09
+  },
+  "BTCUSD": {
+    "win_rate": 16.8,
+    "avg_rrr": 3.0,
+    "expectancy": -0.3267,
+    "total_trades": 505,
+    "rank_score": -3.267
+  },
+  "ETHUSD": {
+    "win_rate": 18.4,
+    "avg_rrr": 3.0,
+    "expectancy": -0.265,
+    "total_trades": 517,
+    "rank_score": -2.65
+  }
+}
