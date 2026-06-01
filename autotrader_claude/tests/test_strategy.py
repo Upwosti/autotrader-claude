@@ -92,9 +92,9 @@ class TestBOSDetector(unittest.TestCase):
         df = make_df(80)
         bos = det.get_latest_bos(df)
         if bos is not None:
-            self.assertIn(bos.direction, ["bullish", "bearish"])
-            self.assertIsInstance(bos.level, float)
-            self.assertIsInstance(bos.confirmed, bool)
+            self.assertIn(bos.direction, ["bullish_bos", "bearish_bos"])
+            self.assertIsInstance(bos.break_price, float)
+            self.assertIsInstance(bos.displacement, bool)
 
 
 class TestFVGDetector(unittest.TestCase):
@@ -104,13 +104,13 @@ class TestFVGDetector(unittest.TestCase):
     def test_find_fvgs_returns_list(self):
         det = FVGDetector(self.params)
         df = make_df(60)
-        fvgs = det.find_fvgs(df)
+        fvgs = det.detect(df)
         self.assertIsInstance(fvgs, list)
 
     def test_fvg_fields(self):
         det = FVGDetector(self.params)
         df = make_df(60)
-        fvgs = det.find_fvgs(df)
+        fvgs = det.detect(df)
         for fvg in fvgs:
             self.assertIn(fvg.direction, ["bullish", "bearish"])
             self.assertGreater(fvg.top, fvg.bottom)
@@ -128,32 +128,32 @@ class TestConfidenceScorer(unittest.TestCase):
 
     def test_score_in_range(self):
         scorer = ConfidenceScorer(self.params)
-        df = make_df(80)
-        score = scorer.score(
-            df=df,
-            direction="bullish",
-            sweep_confirmed=True,
-            bos_confirmed=True,
-            fvg_valid=True,
-            htf_bias="bullish",
-            spread_pips=1.5,
+        result = scorer.score(
+            sweep=None,
+            bos=None,
+            fvg=None,
+            in_kill_zone=True,
+            higher_tf_bias_aligned=True,
+            displacement_present=True,
+            spread_ok=True,
+            news_clear=True,
         )
-        self.assertGreaterEqual(score, 0)
-        self.assertLessEqual(score, 10)
+        self.assertGreaterEqual(result.total, 0)
+        self.assertLessEqual(result.total, 10)
 
     def test_low_score_with_conflicts(self):
         scorer = ConfidenceScorer(self.params)
-        df = make_df(80)
-        score = scorer.score(
-            df=df,
-            direction="bullish",
-            sweep_confirmed=False,
-            bos_confirmed=False,
-            fvg_valid=False,
-            htf_bias="bearish",
-            spread_pips=5.0,
+        result = scorer.score(
+            sweep=None,
+            bos=None,
+            fvg=None,
+            in_kill_zone=False,
+            higher_tf_bias_aligned=False,
+            displacement_present=False,
+            spread_ok=False,
+            news_clear=False,
         )
-        self.assertLess(score, 5)
+        self.assertLess(result.total, 5)
 
 
 class TestICTEngine(unittest.TestCase):
@@ -162,18 +162,24 @@ class TestICTEngine(unittest.TestCase):
         self.engine = ICTEngine(self.params)
 
     def test_generate_signal_returns_none_or_signal(self):
-        df = make_df(100)
-        result = self.engine.generate_signal(df, "XAUUSD")
-        if result is not None:
-            self.assertIn(result.direction, ["buy", "sell"])
-            self.assertGreater(result.confidence_score, 0)
+        h4_df = make_df(100)
+        daily_df = make_df(30)
+        weekly_df = make_df(10)
+        result = self.engine.generate_signal(h4_df, daily_df, weekly_df)
+        # generate_signal always returns a TradeSignal (valid or invalid)
+        self.assertIsNotNone(result)
+        if result.valid:
+            self.assertIn(result.direction, ["long", "short"])
+            self.assertGreater(result.confidence.total, 0)
             self.assertGreater(result.take_profit, 0)
             self.assertGreater(result.stop_loss, 0)
 
     def test_signal_has_valid_rrr(self):
-        df = make_df(100)
-        result = self.engine.generate_signal(df, "XAUUSD")
-        if result is not None:
+        h4_df = make_df(100)
+        daily_df = make_df(30)
+        weekly_df = make_df(10)
+        result = self.engine.generate_signal(h4_df, daily_df, weekly_df)
+        if result.valid:
             self.assertGreaterEqual(result.rrr, self.params.min_rrr)
 
 

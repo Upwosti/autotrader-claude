@@ -17,7 +17,7 @@ except ImportError:
 
 from config import SUPABASE_URL, SUPABASE_KEY
 
-LOCAL_DB_DIR = "C:\\AutoTraderClaude\\local_db"
+LOCAL_DB_DIR = os.path.join(os.path.expanduser("~"), "AutoTraderClaude", "local_db")
 
 
 class SupabaseClient:
@@ -95,7 +95,7 @@ class SupabaseClient:
                 return res.data[0] if res.data else None
             except Exception as e:
                 logger.error(f"Supabase upsert error ({table}): {e}")
-        return self._local_insert(table, data)
+        return self._local_upsert(table, data)
 
     # ─── Local JSON fallback ──────────────────────────────────────────────
 
@@ -115,6 +115,18 @@ class SupabaseClient:
     def _save_table(self, table: str, rows: List[Dict]):
         with open(self._table_path(table), "w") as f:
             json.dump(rows, f, indent=2, default=str)
+
+    def _local_upsert(self, table: str, data: Dict) -> Dict:
+        """Update existing row if matched by 'id' or 'key'; otherwise insert."""
+        rows = self._load_table(table)
+        match_field = "id" if "id" in data else ("key" if "key" in data else None)
+        if match_field:
+            for i, row in enumerate(rows):
+                if row.get(match_field) == data[match_field]:
+                    rows[i] = {**row, **data}
+                    self._save_table(table, rows)
+                    return rows[i]
+        return self._local_insert(table, data)
 
     def _local_insert(self, table: str, data: Dict) -> Dict:
         rows = self._load_table(table)

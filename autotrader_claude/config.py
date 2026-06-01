@@ -125,7 +125,7 @@ PARAM_RANGES: Dict[str, Any] = {
 BACKTEST_INITIAL_CAPITAL: float = 10_000.0
 BACKTEST_COMMISSION_PCT: float = 0.05        # 0.05% per side
 BACKTEST_SLIPPAGE_PIPS: float = 1.0
-DATA_DIR: str = "C:\\AutoTraderClaude\\data"
+DATA_DIR: str = os.path.join(os.path.expanduser("~"), "AutoTraderClaude", "data")
 
 # ─── DASHBOARD ────────────────────────────────────────────────────────────────
 DASHBOARD_HOST: str = "0.0.0.0"
@@ -138,4 +138,4 @@ CLAUDE_MAX_TOKENS: int = 4096
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = "INFO"
-LOG_FILE: str = "C:\\AutoTraderClaude\\logs\\autotrader.log"
+LOG_FILE: str = os.path.join(os.path.expanduser("~"), "AutoTraderClaude", "logs", "autotrader.log")

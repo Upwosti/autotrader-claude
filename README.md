@@ -1,20 +1,18 @@
-<<<<<<< HEAD
-﻿# AutoTrader Claude
+# AutoTrader Claude
 
-Automated MT5 Trading Bot powered by Claude AI.
+Automated trading bot powered by Claude AI, using ICT (Inner Circle Trader) strategy with evolutionary parameter optimization.
 
 ## Setup
 - Python 3.11
-- MetaTrader5, pandas, numpy, flask, scikit-learn
+- pandas, numpy, flask, anthropic, supabase
 - Telegram notifications via python-telegram-bot
 - GitHub integration via PyGithub
 
 ## Structure
-- main.py - Entry point
-- 	rader/ - Trading logic
-- strategies/ - Trading strategies
-- utils/ - Utilities
-=======
-# autotrader-claude
-AutoTrader Claude - Automated MT5 Trading Bot
->>>>>>> ce699611e888a2cf56520dfc76035a5c7d098ced
+- `autotrader_claude/main.py` - Entry point (evolve / backtest / dashboard / test)
+- `autotrader_claude/strategy/` - ICT signal generation
+- `autotrader_claude/backtester/` - Walk-forward backtesting engine
+- `autotrader_claude/evolution/` - Evolutionary parameter optimization
+- `autotrader_claude/database/` - Supabase + local JSON fallback
+- `autotrader_claude/alerts/` - Telegram and email notifications
+- `autotrader_claude/dashboard/` - Flask web dashboard
