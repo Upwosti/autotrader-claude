@@ -14,6 +14,7 @@ from config import (
     BACKTEST_COMMISSION_PCT, BACKTEST_SLIPPAGE_PIPS,
 )
 from strategy.ict_engine import ICTEngine, TradeSignal
+from strategy.confidence import PD_ARRAY_QUALITY
 from backtester.data_loader import DataLoader
 
 
@@ -81,6 +82,124 @@ class BacktestEngine:
         self.params = params
         self.loader = DataLoader()
 
+    def _precompute_signals(self, engine, h4_df, daily_df, weekly_df, lookback, n):
+        """Pre-detect all PD arrays / sweeps / BOS ONCE on the full series, then
+        emit signals per evaluation bar using cheap index lookups.
+
+        This replaces the old approach of re-running every detector over an
+        expanding window on every bar (~75s per run). Detection cost is now O(1)
+        across the whole series instead of O(bars) full re-scans.
+        """
+        # One-shot detection on the full H4 series.
+        all_sweeps = engine.liquidity.detect_sweeps(
+            h4_df, engine.liquidity.find_levels(h4_df))
+        all_bos = engine.bos.detect(h4_df)
+        all_pd = engine.pd_scanner.scan_all(h4_df)
+
+        # Sort by the bar index at which each becomes known.
+        all_sweeps.sort(key=lambda s: s.sweep_candle_index)
+        all_bos.sort(key=lambda b: b.break_candle_index)
+        all_pd.sort(key=lambda h: h.index)
+
+        close = h4_df["close"].to_numpy(dtype=float)
+        index = h4_df.index
+
+        # Daily/weekly bias evolves slowly; recompute only when the HTF slice
+        # actually advances to a new bar.
+        signals = []
+        last_d1 = -1
+        last_w1 = -1
+        htf_bias = "neutral"
+
+        si = bi = pi = 0
+        cur_sweep = cur_bos = None
+        # Track most-recent PD hit per direction for fast nearest lookups.
+        for i in range(lookback, n - 1):
+            # advance sweep/bos pointers to include everything known by bar i
+            while si < len(all_sweeps) and all_sweeps[si].sweep_candle_index <= i:
+                if all_sweeps[si].confirmed:
+                    cur_sweep = all_sweeps[si]
+                si += 1
+            while bi < len(all_bos) and all_bos[bi].break_candle_index <= i:
+                cur_bos = all_bos[bi]
+                bi += 1
+            while pi < len(all_pd) and all_pd[pi].index <= i:
+                pi += 1
+            known_pd = all_pd[:pi]
+
+            d1_end = max(1, i // 4)
+            w1_end = max(1, i // 20)
+            if d1_end != last_d1 or w1_end != last_w1:
+                htf_bias = engine._get_htf_bias(
+                    daily_df.iloc[:d1_end], weekly_df.iloc[:w1_end])
+                last_d1, last_w1 = d1_end, w1_end
+
+            current_time = index[i]
+            ct = current_time.to_pydatetime() if hasattr(current_time, "to_pydatetime") else current_time
+            sig = self._fast_signal(
+                engine, h4_df, i, float(close[i]), ct,
+                cur_sweep, cur_bos, known_pd, htf_bias,
+            )
+            signals.append((i, sig))
+        return signals
+
+    def _fast_signal(self, engine, h4_df, i, price, ct,
+                     sweep, bos, known_pd, htf_bias):
+        """Build a TradeSignal from pre-computed events (no re-detection)."""
+        in_kz, session = engine._in_kill_zone(ct)
+
+        direction = None
+        if sweep and bos:
+            if sweep.direction == "bullish_sweep" and bos.direction == "bullish_bos":
+                direction = "long"
+            elif sweep.direction == "bearish_sweep" and bos.direction == "bearish_bos":
+                direction = "short"
+
+        # nearest PD array of matching direction among already-known hits
+        pd_hit = None
+        if direction:
+            want = "bullish" if direction == "long" else "bearish"
+            prio = {k: idx for idx, k in enumerate(
+                ["BB", "MB", "OB", "PB", "RB", "IRB", "IFVG", "VI", "LV", "BPR"])}
+            cands = [h for h in known_pd if h.direction == want]
+            if cands:
+                cands.sort(key=lambda h: (prio.get(h.kind, 99), abs(price - h.midpoint)))
+                pd_hit = cands[0]
+
+        displacement = bos.displacement if bos else False
+        htf_aligned = (
+            (direction == "long" and htf_bias == "bullish") or
+            (direction == "short" and htf_bias == "bearish")
+        )
+
+        score = engine.scorer.score(
+            sweep=sweep, bos=bos, fvg=None, in_kill_zone=in_kz,
+            higher_tf_bias_aligned=htf_aligned, displacement_present=displacement,
+            spread_ok=True, news_clear=True, dxy_conflict=False, pair=engine.pair,
+            pd_array_kind=pd_hit.kind if pd_hit else None,
+        )
+
+        if direction is None or not score.passed:
+            return TradeSignal(
+                pair=engine.pair, direction=direction or "none",
+                entry_price=price, stop_loss=0, take_profit=0, rrr=0,
+                confidence=score, sweep=sweep, bos=bos, fvg=None,
+                session=session, timestamp=ct, valid=False, reason=score.reason,
+                pd_array=pd_hit,
+            )
+
+        entry = pd_hit.midpoint if pd_hit else price
+        sl = engine._calc_stop_loss(direction, sweep, pd_hit, entry)
+        tp = engine._calc_take_profit(direction, entry, sl, None)
+        rrr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
+        valid = rrr >= engine.params.min_rrr
+        return TradeSignal(
+            pair=engine.pair, direction=direction, entry_price=entry,
+            stop_loss=sl, take_profit=tp, rrr=rrr, confidence=score,
+            sweep=sweep, bos=bos, fvg=None, session=session, timestamp=ct,
+            valid=valid, reason=score.reason + f" | RRR={rrr:.2f}", pd_array=pd_hit,
+        )
+
     def run(
         self,
         pair: str = "XAUUSD",
@@ -108,51 +227,52 @@ class BacktestEngine:
         n = len(h4_df)
         lookback = max(self.params.liquidity_sweep_lookback, self.params.bos_lookback) + 10
 
-        for i in range(lookback, n - 1):
-            window_h4 = h4_df.iloc[:i]
-            window_d1 = daily_df.iloc[:max(1, i // 4)]
-            window_w1 = weekly_df.iloc[:max(1, i // 20)]
-            current_time = h4_df.index[i]
+        # ─── PRE-COMPUTE PD arrays / sweeps / BOS ONCE on the full series ──────
+        # Each detected event carries the bar index at which it becomes known.
+        # In the loop we only consider events with index <= current bar, so no
+        # re-detection per bar is required (the slow part of the old engine).
+        signals = self._precompute_signals(
+            engine, h4_df, daily_df, weekly_df, lookback, n)
 
-            signal: TradeSignal = engine.generate_signal(
-                h4_df=window_h4,
-                daily_df=window_d1,
-                weekly_df=window_w1,
-                current_time=current_time.to_pydatetime() if hasattr(current_time, "to_pydatetime") else current_time,
-                spread_pips=0.3,
-                news_clear=True,
-            )
+        # Vectorised next-candle arrays for fast outcome simulation.
+        nc_high = h4_df["high"].to_numpy(dtype=float)
+        nc_low = h4_df["low"].to_numpy(dtype=float)
+        nc_close = h4_df["close"].to_numpy(dtype=float)
 
+        for i, signal in signals:
             if not signal.valid:
                 continue
 
-            # Simulate trade outcome on next candle
-            next_candle = h4_df.iloc[i + 1]
+            # Simulate trade outcome on next candle (vectorised lookup)
+            next_high = nc_high[i + 1]
+            next_low = nc_low[i + 1]
+            next_close = nc_close[i + 1]
             entry = signal.entry_price + slippage * (1 if signal.direction == "long" else -1)
             sl = signal.stop_loss
             tp = signal.take_profit
+            current_time = h4_df.index[i]
 
             # Determine outcome
             if signal.direction == "long":
-                if next_candle["low"] <= sl:
+                if next_low <= sl:
                     outcome = "loss"
                     exit_price = sl
-                elif next_candle["high"] >= tp:
+                elif next_high >= tp:
                     outcome = "win"
                     exit_price = tp
                 else:
                     outcome = "open"
-                    exit_price = next_candle["close"]
+                    exit_price = next_close
             else:
-                if next_candle["high"] >= sl:
+                if next_high >= sl:
                     outcome = "loss"
                     exit_price = sl
-                elif next_candle["low"] <= tp:
+                elif next_low <= tp:
                     outcome = "win"
                     exit_price = tp
                 else:
                     outcome = "open"
-                    exit_price = next_candle["close"]
+                    exit_price = next_close
 
             risk_amount = capital * (self.params.risk_pct / 100 if hasattr(self.params, "risk_pct") else 0.01)
             pnl_pips = (exit_price - entry) / pip_size if signal.direction == "long" else (entry - exit_price) / pip_size
