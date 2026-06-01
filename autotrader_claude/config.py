@@ -82,6 +82,42 @@ class StrategyParams:
     use_ny: bool = True
     use_asia: bool = False
 
+    # ─── New PD Array parameters ──────────────────────────────────────────
+    # Order Block
+    ob_lookback: int = 30                       # bars to scan for OBs
+    ob_impulse_factor: float = 1.5              # impulse range vs avg range
+
+    # Propulsion / Mitigation / Breaker
+    pb_mt_tolerance: float = 0.5                # 50% midpoint tolerance
+    structure_swing_lookback: int = 5           # swing pivot half-window
+
+    # Rejection Block
+    rb_min_wick_pct: float = 0.5                # wick must be >= % of range
+
+    # Immediate Rebalance / Volume Imbalance / Liquidity Void
+    irb_tolerance_pct: float = 0.1              # pullback proximity tolerance
+
+    # Key liquidity
+    equal_level_tolerance_pips: float = 5.0     # pip tolerance for equal H/L
+    key_liquidity_lookback: int = 100           # bars to scan for key levels
+
+    # IRL/ERL
+    irl_erl_proximity_pips: float = 10.0        # "near" a level threshold
+
+    # SMT
+    smt_lookback: int = 20                      # bars to compare swings
+
+    # Double purge
+    double_purge_lookback: int = 50             # bars to scan for double purge
+
+    # CRT / TBS
+    crt_range_factor: float = 1.3               # CRT candle vs avg range
+    tbs_min_bodies_inside: int = 2              # min confirmation bodies inside CRT
+
+    # Consolidation filter
+    adr_atr_min_ratio: float = 0.3              # skip if ADR < 30% of ATR(20)
+    atr_period: int = 20
+
     # Evolution metadata
     version: int = 1
     notes: str = "Initial parameters"
@@ -133,8 +169,25 @@ DASHBOARD_PORT: int = 5000
 DASHBOARD_DEBUG: bool = False
 
 # ─── CLAUDE MODEL ─────────────────────────────────────────────────────────────
-CLAUDE_MODEL: str = "claude-sonnet-4-6"
-CLAUDE_MAX_TOKENS: int = 4096
+CLAUDE_MODEL: str = "claude-opus-4-8"
+CLAUDE_MAX_TOKENS: int = 8192
+
+# ─── SMT CORRELATION PAIRS ────────────────────────────────────────────────────
+# Positively correlated pairs (used for SMT divergence detection).
+# Each value is a dict with the correlated partner and the correlation sign.
+SMT_CORRELATION_PAIRS: Dict[str, Dict[str, Any]] = {
+    "EURUSD": {"partner": "GBPUSD", "correlation": "positive"},
+    "GBPUSD": {"partner": "EURUSD", "correlation": "positive"},
+    "AUDUSD": {"partner": "NZDUSD", "correlation": "positive"},
+    "NZDUSD": {"partner": "AUDUSD", "correlation": "positive"},
+    "XAUUSD": {"partner": "XAGUSD", "correlation": "positive"},   # Gold / Silver
+    "XAGUSD": {"partner": "XAUUSD", "correlation": "positive"},
+    "BTCUSD": {"partner": "ETHUSD", "correlation": "positive"},
+    "ETHUSD": {"partner": "BTCUSD", "correlation": "positive"},
+}
+
+# DXY is negatively correlated with these (a divergence vs DXY is a tell).
+DXY_NEGATIVE_PAIRS: List[str] = ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD"]
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = "INFO"
