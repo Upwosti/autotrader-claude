@@ -36,6 +36,12 @@ LONDON_KILL_ZONE: Dict[str, int] = {"start": 7, "end": 10}    # 07:00–10:00 UT
 NY_KILL_ZONE: Dict[str, int] = {"start": 13, "end": 16}        # 13:00–16:00 UTC
 NEWS_BLACKOUT_MINUTES: int = 10                                  # skip 10 min before high-impact news
 
+# ─── MT5 CONNECTION ──────────────────────────────────────────────────────────
+# Native MetaTrader5 package only works on Windows.
+# On Linux: set MT5_HOST to the IP of your Windows machine running mt5linux server.
+MT5_HOST: str = os.getenv("MT5_HOST", "localhost")
+MT5_PORT: int = int(os.getenv("MT5_PORT", "18812"))
+
 # ─── RISK MANAGEMENT ─────────────────────────────────────────────────────────
 RISK_PER_TRADE_PCT: float = 1.0          # % of account per trade
 DAILY_LOSS_LIMIT_PCT: float = 2.0        # max daily drawdown %

@@ -223,51 +223,77 @@ class LiveController:
                 logger.warning(f"Failed to load {self.pair} {tf}: {e}")
         return data
 
-    # ── MT5 integration (requires MetaTrader5 package) ─────────────────────
+    # ── MT5 integration (via mt5_bridge — works on Windows or Linux) ────────
+
+    def _get_mt5(self):
+        """Lazy-load the MT5 API via bridge (native or mt5linux)."""
+        if not hasattr(self, "_mt5_api"):
+            try:
+                from execution.mt5_bridge import get_mt5
+                self._mt5_api = get_mt5()
+            except Exception:
+                self._mt5_api = None
+        return self._mt5_api
 
     def _mt5_get_balance(self) -> Optional[float]:
+        mt5 = self._get_mt5()
+        if mt5 is None:
+            return None
         try:
-            import MetaTrader5 as mt5
             info = mt5.account_info()
             if info:
                 return float(info.balance)
-        except ImportError:
-            pass
         except Exception as e:
             logger.error(f"MT5 balance error: {e}")
         return None
 
     def _mt5_open_trade(self, signal: ModuleSignal) -> bool:
+        mt5 = self._get_mt5()
+        if mt5 is None:
+            logger.warning("MT5 unavailable — falling back to paper mode for this trade")
+            return False
         try:
-            import MetaTrader5 as mt5
             direction = mt5.ORDER_TYPE_BUY if signal.direction == "long" else mt5.ORDER_TYPE_SELL
             lot = self._calc_lot_size(signal)
+            tick = mt5.symbol_info_tick(self.pair)
+            if tick is None:
+                logger.error(f"Cannot get tick for {self.pair}")
+                return False
+            price = tick.ask if signal.direction == "long" else tick.bid
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": self.pair,
                 "volume": lot,
                 "type": direction,
-                "price": mt5.symbol_info_tick(self.pair).ask if signal.direction == "long"
-                         else mt5.symbol_info_tick(self.pair).bid,
+                "price": price,
                 "sl": signal.stop_loss,
                 "tp": signal.take_profit,
+                "deviation": 20,
                 "magic": 20240101,
                 "comment": f"ICT-{signal.module_name}",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
             result = mt5.order_send(request)
+            if result is None:
+                logger.error(f"MT5 order_send returned None: {mt5.last_error()}")
+                return False
             if result.retcode == mt5.TRADE_RETCODE_DONE:
-                logger.info(f"MT5 order placed: {result.order}")
+                logger.info(f"MT5 order placed: ticket={result.order} lot={lot:.2f} price={price:.5f}")
                 return True
-            logger.error(f"MT5 order failed: {result.retcode} {result.comment}")
-            return False
-        except ImportError:
-            logger.warning("MT5 not installed — switching to paper mode for this trade")
+            logger.error(f"MT5 order failed: retcode={result.retcode} comment={result.comment}")
             return False
         except Exception as e:
             logger.error(f"MT5 open trade error: {e}")
             return False
+
+    # Pip value per standard lot (1.0 lot) in USD
+    _PIP_VALUE_PER_LOT: Dict[str, float] = {
+        "XAUUSD": 10.0,    # $10 per pip ($0.01) per standard lot
+        "BTCUSD": 1.0,     # $1 per point per 1 BTC
+        "GBPUSD": 10.0,    # $10 per pip per standard lot
+        "EURUSD": 10.0,    # $10 per pip per standard lot
+    }
 
     def _calc_lot_size(self, signal: ModuleSignal) -> float:
         """Risk-based lot sizing: risk_pct% of balance per trade."""
@@ -275,7 +301,7 @@ class LiveController:
         sl_pips = abs(signal.entry_price - signal.stop_loss) / self.pip_size
         if sl_pips <= 0:
             return 0.01
-        pip_value = 1.0  # $1 per pip for mini lot — adjust per instrument
+        pip_value = self._PIP_VALUE_PER_LOT.get(self.pair.upper(), 10.0)
         lot = risk_amount / (sl_pips * pip_value)
         return round(max(0.01, min(lot, 10.0)), 2)
 

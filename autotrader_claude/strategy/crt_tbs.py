@@ -170,8 +170,20 @@ class CRTTBSDetector:
         inside = (body_top <= crt.high) & (body_bot >= crt.low)
         bodies_inside = int(np.sum(inside))
 
-        high_swept = bool(np.any(h > crt.high))
-        low_swept = bool(np.any(l < crt.low))
+        # Sweep must close BACK INSIDE the CRT range (manipulation confirmation)
+        hi_sweep_mask = (h > crt.high) & (c < crt.high)   # wick above, close below
+        lo_sweep_mask = (l < crt.low)  & (c > crt.low)    # wick below, close above
+        high_swept = bool(np.any(hi_sweep_mask))
+        low_swept  = bool(np.any(lo_sweep_mask))
+
+        # Recency gate: sweep must have happened within last 20 bars of this window
+        _MAX_SWEEP_AGE = 20
+        if high_swept:
+            last_hi_idx = int(np.nonzero(hi_sweep_mask)[0][-1])
+            high_swept = (n - 1 - last_hi_idx) <= _MAX_SWEEP_AGE
+        if low_swept:
+            last_lo_idx = int(np.nonzero(lo_sweep_mask)[0][-1])
+            low_swept = (n - 1 - last_lo_idx) <= _MAX_SWEEP_AGE
 
         inside_highs = h[inside] if inside.any() else np.array([])
         equal_highs = self._has_equal(inside_highs)
@@ -182,8 +194,8 @@ class CRTTBSDetector:
         elif high_swept and not low_swept:
             direction = "bearish"
         elif high_swept and low_swept:
-            hi_bars = np.nonzero(h > crt.high)[0]
-            lo_bars = np.nonzero(l < crt.low)[0]
+            hi_bars = np.nonzero(hi_sweep_mask)[0]
+            lo_bars = np.nonzero(lo_sweep_mask)[0]
             last_hi = int(hi_bars[-1]) if hi_bars.size else -1
             last_lo = int(lo_bars[-1]) if lo_bars.size else -1
             direction = "bearish" if last_hi > last_lo else "bullish"
@@ -292,7 +304,17 @@ class CRTTBSDetector:
         stop_price = 0.0
 
         if crt is not None:
-            tbs = self.detect_tbs(tbs_df, crt, timeframe=tbs_tf)
+            # Align TBS window: only use LTF2 bars that come AFTER the CRT candle
+            tbs_slice = tbs_df
+            try:
+                crt_time = crt_df.index[crt.index]
+                after_crt = tbs_df.index > crt_time
+                if after_crt.any():
+                    tbs_slice = tbs_df[after_crt]
+            except Exception:
+                pass
+
+            tbs = self.detect_tbs(tbs_slice, crt, timeframe=tbs_tf)
             high_prob = self.is_high_probability_tbs(crt, tbs)
             if high_prob and tbs:
                 direction = "long" if tbs.direction == "bullish" else (
