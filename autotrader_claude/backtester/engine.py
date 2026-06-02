@@ -83,8 +83,9 @@ class BacktestEngine:
         self.loader = DataLoader()
 
     def _precompute_signals(self, engine, h4_df, daily_df, weekly_df, lookback, n):
-        """Pre-detect all PD arrays / sweeps / BOS ONCE on the full series, then
-        emit signals per evaluation bar using cheap index lookups.
+        """Pre-detect all PD arrays / sweeps / BOS / double-purges ONCE on the
+        full series, then emit signals per evaluation bar using cheap index
+        lookups.
 
         This replaces the old approach of re-running every detector over an
         expanding window on every bar (~75s per run). Detection cost is now O(1)
@@ -95,11 +96,13 @@ class BacktestEngine:
             h4_df, engine.liquidity.find_levels(h4_df))
         all_bos = engine.bos.detect(h4_df)
         all_pd = engine.pd_scanner.scan_all(h4_df)
+        all_dp = engine.double_purge.detect(h4_df, lookback=n)
 
         # Sort by the bar index at which each becomes known.
         all_sweeps.sort(key=lambda s: s.sweep_candle_index)
         all_bos.sort(key=lambda b: b.break_candle_index)
         all_pd.sort(key=lambda h: h.index)
+        all_dp.sort(key=lambda d: d.index)
 
         close = h4_df["close"].to_numpy(dtype=float)
         index = h4_df.index
@@ -111,11 +114,11 @@ class BacktestEngine:
         last_w1 = -1
         htf_bias = "neutral"
 
-        si = bi = pi = 0
-        cur_sweep = cur_bos = None
+        si = bi = pi = di = 0
+        cur_sweep = cur_bos = cur_dp = None
         # Track most-recent PD hit per direction for fast nearest lookups.
         for i in range(lookback, n - 1):
-            # advance sweep/bos pointers to include everything known by bar i
+            # advance sweep/bos/dp pointers to include everything known by bar i
             while si < len(all_sweeps) and all_sweeps[si].sweep_candle_index <= i:
                 if all_sweeps[si].confirmed:
                     cur_sweep = all_sweeps[si]
@@ -125,6 +128,9 @@ class BacktestEngine:
                 bi += 1
             while pi < len(all_pd) and all_pd[pi].index <= i:
                 pi += 1
+            while di < len(all_dp) and all_dp[di].index <= i:
+                cur_dp = all_dp[di]
+                di += 1
             known_pd = all_pd[:pi]
 
             d1_end = max(1, i // 4)
@@ -138,54 +144,101 @@ class BacktestEngine:
             ct = current_time.to_pydatetime() if hasattr(current_time, "to_pydatetime") else current_time
             sig = self._fast_signal(
                 engine, h4_df, i, float(close[i]), ct,
-                cur_sweep, cur_bos, known_pd, htf_bias,
+                cur_sweep, cur_bos, known_pd, htf_bias, cur_dp,
             )
             signals.append((i, sig))
         return signals
 
+    @staticmethod
+    def _nearest_pd(known_pd, want, price):
+        """Highest-priority PD array of the wanted direction nearest to price."""
+        prio = {k: idx for idx, k in enumerate(
+            ["BB", "MB", "OB", "PB", "RB", "IRB", "IFVG", "VI", "LV", "BPR"])}
+        cands = [h for h in known_pd if h.direction == want]
+        if not cands:
+            return None
+        cands.sort(key=lambda h: (prio.get(h.kind, 99), abs(price - h.midpoint)))
+        return cands[0]
+
     def _fast_signal(self, engine, h4_df, i, price, ct,
-                     sweep, bos, known_pd, htf_bias):
-        """Build a TradeSignal from pre-computed events (no re-detection)."""
+                     sweep, bos, known_pd, htf_bias, dp=None):
+        """Build a TradeSignal from pre-computed events (no re-detection).
+
+        Multiple independent entry plans are honoured (per the ICT material there
+        is more than one valid way to enter). Direction is resolved by the first
+        plan that fires, in order of strength:
+
+            Plan A  sweep + BOS aligned          (classic liquidity-grab reversal)
+            Plan B  double purge                 (both sides swept → run opposite)
+            Plan C  BOS alone                    (market-structure shift)
+            Plan D  HTF bias + matching PD array  (continuation into a PD array)
+        """
         in_kz, session = engine._in_kill_zone(ct)
 
         direction = None
+        plan = "none"
+        # Plan A — liquidity sweep confirmed by a BOS in the same direction.
         if sweep and bos:
             if sweep.direction == "bullish_sweep" and bos.direction == "bullish_bos":
-                direction = "long"
+                direction, plan = "long", "sweep+bos"
             elif sweep.direction == "bearish_sweep" and bos.direction == "bearish_bos":
-                direction = "short"
+                direction, plan = "short", "sweep+bos"
+        # Plan B — double purge: trade opposite the last side that was purged.
+        if direction is None and dp is not None:
+            direction = "long" if dp.direction == "bullish" else "short"
+            plan = "double_purge"
+        # Plan C — a market-structure shift on its own.
+        if direction is None and bos is not None:
+            direction = "long" if bos.direction == "bullish_bos" else "short"
+            plan = "bos"
+        # Plan D — HTF bias continuation that has a PD array to enter against.
+        if direction is None and htf_bias in ("bullish", "bearish"):
+            want = "bullish" if htf_bias == "bullish" else "bearish"
+            if self._nearest_pd(known_pd, want, price) is not None:
+                direction = "long" if htf_bias == "bullish" else "short"
+                plan = "htf+pd"
 
-        # nearest PD array of matching direction among already-known hits
-        pd_hit = None
-        if direction:
-            want = "bullish" if direction == "long" else "bearish"
-            prio = {k: idx for idx, k in enumerate(
-                ["BB", "MB", "OB", "PB", "RB", "IRB", "IFVG", "VI", "LV", "BPR"])}
-            cands = [h for h in known_pd if h.direction == want]
-            if cands:
-                cands.sort(key=lambda h: (prio.get(h.kind, 99), abs(price - h.midpoint)))
-                pd_hit = cands[0]
+        if direction is None:
+            score = engine.scorer.score(
+                sweep=sweep, bos=bos, fvg=None, in_kill_zone=in_kz,
+                higher_tf_bias_aligned=False, displacement_present=False,
+                spread_ok=True, news_clear=True, dxy_conflict=False, pair=engine.pair,
+            )
+            return TradeSignal(
+                pair=engine.pair, direction="none", entry_price=price,
+                stop_loss=0, take_profit=0, rrr=0, confidence=score,
+                sweep=sweep, bos=bos, fvg=None, session=session, timestamp=ct,
+                valid=False, reason="[SKIP] no entry plan matched", pd_array=None,
+            )
+
+        want = "bullish" if direction == "long" else "bearish"
+        pd_hit = self._nearest_pd(known_pd, want, price)
 
         displacement = bos.displacement if bos else False
         htf_aligned = (
             (direction == "long" and htf_bias == "bullish") or
             (direction == "short" and htf_bias == "bearish")
         )
+        dp_aligned = bool(dp and (
+            (direction == "long" and dp.direction == "bullish") or
+            (direction == "short" and dp.direction == "bearish")
+        ))
 
         score = engine.scorer.score(
             sweep=sweep, bos=bos, fvg=None, in_kill_zone=in_kz,
             higher_tf_bias_aligned=htf_aligned, displacement_present=displacement,
             spread_ok=True, news_clear=True, dxy_conflict=False, pair=engine.pair,
             pd_array_kind=pd_hit.kind if pd_hit else None,
+            double_purge=dp_aligned,
         )
 
-        if direction is None or not score.passed:
+        if not score.passed:
             return TradeSignal(
-                pair=engine.pair, direction=direction or "none",
+                pair=engine.pair, direction=direction,
                 entry_price=price, stop_loss=0, take_profit=0, rrr=0,
                 confidence=score, sweep=sweep, bos=bos, fvg=None,
-                session=session, timestamp=ct, valid=False, reason=score.reason,
-                pd_array=pd_hit,
+                session=session, timestamp=ct, valid=False,
+                reason=f"[{plan}] " + score.reason, pd_array=pd_hit,
             )
 
         entry = pd_hit.midpoint if pd_hit else price
@@ -197,7 +250,8 @@ class BacktestEngine:
             pair=engine.pair, direction=direction, entry_price=entry,
             stop_loss=sl, take_profit=tp, rrr=rrr, confidence=score,
             sweep=sweep, bos=bos, fvg=None, session=session, timestamp=ct,
-            valid=valid, reason=score.reason + f" | RRR={rrr:.2f}", pd_array=pd_hit,
+            valid=valid, reason=f"[{plan}] " + score.reason + f" | RRR={rrr:.2f}",
+            pd_array=pd_hit,
         )
 
     def run(
