@@ -143,7 +143,12 @@ EVOLUTION_REPORT_TRADES: int = 1_000
 
 # Parameter mutation ranges (used by optimizer)
 PARAM_RANGES: Dict[str, Any] = {
-    "liquidity_sweep_lookback": (10, 50, 5),       # (min, max, step)
+    # CRT/TBS signal parameters (most impactful for module performance)
+    "crt_range_factor": (0.8, 2.5, 0.1),          # CRT candle size vs avg range
+    "tbs_min_bodies_inside": [1, 2, 3],            # Bodies inside CRT for TBS confirm
+    "equal_level_tolerance_pips": (2.0, 10.0, 1.0),
+    # ICT signal parameters
+    "liquidity_sweep_lookback": (10, 50, 5),
     "liquidity_min_touches": (1, 4, 1),
     "liquidity_sweep_wick_pct": (0.1, 0.6, 0.1),
     "bos_confirmation": ["candle_close", "wick"],

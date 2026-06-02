@@ -189,8 +189,10 @@ class CRTTBSDetector:
             direction = "bearish" if last_hi > last_lo else "bullish"
 
         # ── Entry model selection (Model 1 OB > Model 2 FVG > Model 3 BOS) ─
+        # Convert bullish/bearish to long/short expected by _best_entry_model
+        entry_dir = "long" if direction == "bullish" else ("short" if direction == "bearish" else "none")
         entry_model, entry_price, stop_price = self._best_entry_model(
-            o, h, l, c, crt, direction)
+            o, h, l, c, crt, entry_dir)
 
         return TBS(
             crt_index=crt.index,

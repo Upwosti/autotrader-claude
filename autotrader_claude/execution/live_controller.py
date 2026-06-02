@@ -1,0 +1,402 @@
+"""
+Live Market Controller — orchestrates all 4 trading modules in real-time.
+
+Modes:
+  paper   — simulates execution with no real money (default, safe)
+  mt5     — live execution via MetaTrader5 Python API (requires MT5 installed)
+
+Architecture:
+  1. Every `poll_interval` seconds: fetch/update latest bars for all timeframes
+  2. Run TradingModuleManager.evaluate_all() on current data
+  3. For each valid signal: check if already in a trade for that module
+  4. If not: open position (paper/MT5), send Telegram alert
+  5. Check open positions: if SL or TP hit, close and report
+  6. Send balance update every `balance_interval` seconds
+
+Balance starts at BACKTEST_INITIAL_CAPITAL and updates from paper P&L.
+MT5 mode reads real account balance from broker.
+"""
+
+import sys
+import os
+import time
+import gc
+import json
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from loguru import logger
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'execution'))
+
+from config import StrategyParams, BACKTEST_INITIAL_CAPITAL
+from backtester.data_loader import DataLoader
+from trading_module import TradingModuleManager, ModuleSignal
+from alerts.telegram_bot import TelegramAlert
+
+_STATE_FILE = os.path.join(os.path.expanduser("~"), "autotrader_live_state.json")
+
+
+# ── Open position ──────────────────────────────────────────────────────────────
+
+@dataclass
+class OpenPosition:
+    module_name: str
+    pair: str
+    direction: str
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    rrr: float
+    risk_pct: float
+    entry_model: str
+    opened_at: datetime
+    size: float = 1.0           # lots / units (paper only)
+    pnl_pips: float = 0.0
+    pnl_pct: float = 0.0
+
+
+# ── Controller ────────────────────────────────────────────────────────────────
+
+class LiveController:
+    """Runs all 4 trading modules in live (paper or MT5) mode."""
+
+    TF_LIST = ["MN", "W1", "D1", "4H", "1H", "15M"]
+
+    def __init__(
+        self,
+        params: StrategyParams,
+        pair: str = "XAUUSD",
+        mode: str = "paper",         # 'paper' | 'mt5'
+        poll_interval: int = 60,     # seconds between bar checks
+        balance_interval: int = 3600,# seconds between balance reports
+        max_open_trades: int = 4,    # one per module max
+        risk_pct: float = 1.0,
+    ):
+        self.params = params
+        self.pair = pair
+        self.mode = mode
+        self.poll_interval = poll_interval
+        self.balance_interval = balance_interval
+        self.max_open_trades = max_open_trades
+        self.risk_pct = risk_pct
+        self.pip_size = self._get_pip_size(pair)
+
+        self.loader = DataLoader()
+        self.module_manager = TradingModuleManager(params)
+        self.telegram = TelegramAlert()
+
+        self.balance = BACKTEST_INITIAL_CAPITAL
+        self.daily_start_balance = self.balance
+        self.open_positions: Dict[str, OpenPosition] = {}  # module_name → position
+        self.closed_trades: List[dict] = []
+        self.total_trades = 0
+        self.last_balance_report = 0.0
+
+        self._load_state()
+
+    def _get_pip_size(self, pair: str) -> float:
+        return {"XAUUSD": 0.01, "BTCUSD": 1.0}.get(pair, 0.0001)
+
+    # ── State persistence ──────────────────────────────────────────────────
+
+    def _save_state(self):
+        state = {
+            "balance": self.balance,
+            "total_trades": self.total_trades,
+            "daily_start_balance": self.daily_start_balance,
+            "closed_trades_count": len(self.closed_trades),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            with open(_STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.warning(f"State save failed: {e}")
+
+    def _load_state(self):
+        if not os.path.exists(_STATE_FILE):
+            return
+        try:
+            with open(_STATE_FILE) as f:
+                state = json.load(f)
+            self.balance = float(state.get("balance", self.balance))
+            self.total_trades = int(state.get("total_trades", 0))
+            self.daily_start_balance = float(state.get("daily_start_balance", self.balance))
+            logger.info(f"Restored state: balance=${self.balance:,.2f} trades={self.total_trades}")
+        except Exception as e:
+            logger.warning(f"State load failed: {e}")
+
+    # ── Data loading ───────────────────────────────────────────────────────
+
+    def _load_data(self) -> Dict[str, object]:
+        """Load all 6 timeframes. Uses synthetic data if no real data available."""
+        data = {}
+        for tf in self.TF_LIST:
+            try:
+                df = self.loader.load(self.pair, tf, synthetic_fallback=True)
+                data[tf] = df
+            except Exception as e:
+                logger.warning(f"Failed to load {self.pair} {tf}: {e}")
+        return data
+
+    # ── MT5 integration (requires MetaTrader5 package) ─────────────────────
+
+    def _mt5_get_balance(self) -> Optional[float]:
+        try:
+            import MetaTrader5 as mt5
+            info = mt5.account_info()
+            if info:
+                return float(info.balance)
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.error(f"MT5 balance error: {e}")
+        return None
+
+    def _mt5_open_trade(self, signal: ModuleSignal) -> bool:
+        try:
+            import MetaTrader5 as mt5
+            direction = mt5.ORDER_TYPE_BUY if signal.direction == "long" else mt5.ORDER_TYPE_SELL
+            lot = self._calc_lot_size(signal)
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": self.pair,
+                "volume": lot,
+                "type": direction,
+                "price": mt5.symbol_info_tick(self.pair).ask if signal.direction == "long"
+                         else mt5.symbol_info_tick(self.pair).bid,
+                "sl": signal.stop_loss,
+                "tp": signal.take_profit,
+                "magic": 20240101,
+                "comment": f"ICT-{signal.module_name}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            result = mt5.order_send(request)
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"MT5 order placed: {result.order}")
+                return True
+            logger.error(f"MT5 order failed: {result.retcode} {result.comment}")
+            return False
+        except ImportError:
+            logger.warning("MT5 not installed — switching to paper mode for this trade")
+            return False
+        except Exception as e:
+            logger.error(f"MT5 open trade error: {e}")
+            return False
+
+    def _calc_lot_size(self, signal: ModuleSignal) -> float:
+        """Risk-based lot sizing: risk_pct% of balance per trade."""
+        risk_amount = self.balance * (self.risk_pct / 100)
+        sl_pips = abs(signal.entry_price - signal.stop_loss) / self.pip_size
+        if sl_pips <= 0:
+            return 0.01
+        pip_value = 1.0  # $1 per pip for mini lot — adjust per instrument
+        lot = risk_amount / (sl_pips * pip_value)
+        return round(max(0.01, min(lot, 10.0)), 2)
+
+    # ── Position management ────────────────────────────────────────────────
+
+    def _open_position(self, signal: ModuleSignal):
+        """Open a new position for the given module signal."""
+        if signal.module_name in self.open_positions:
+            logger.debug(f"Already in trade for {signal.module_name} — skipping")
+            return
+
+        if len(self.open_positions) >= self.max_open_trades:
+            logger.debug(f"Max open trades ({self.max_open_trades}) reached — skipping")
+            return
+
+        success = True
+        if self.mode == "mt5":
+            success = self._mt5_open_trade(signal)
+
+        if success:
+            self.open_positions[signal.module_name] = OpenPosition(
+                module_name=signal.module_name,
+                pair=self.pair,
+                direction=signal.direction,
+                entry_price=signal.entry_price,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                rrr=signal.rrr,
+                risk_pct=self.risk_pct,
+                entry_model=signal.entry_model,
+                opened_at=datetime.now(timezone.utc),
+            )
+            self.total_trades += 1
+            logger.info(f"[{self.mode.upper()}] Opened {signal.direction} on {signal.module_name} "
+                        f"entry={signal.entry_price:.4f} SL={signal.stop_loss:.4f} TP={signal.take_profit:.4f}")
+            self.telegram.send_trade_alert(
+                module=signal.module_name,
+                direction=signal.direction,
+                pair=self.pair,
+                entry=signal.entry_price,
+                sl=signal.stop_loss,
+                tp=signal.take_profit,
+                rrr=signal.rrr,
+                balance=self.balance,
+                entry_model=signal.entry_model,
+            )
+            self._save_state()
+
+    def _check_positions(self, data: dict):
+        """Check if any open positions have hit SL or TP."""
+        latest_tf = "15M" if "15M" in data else "1H" if "1H" in data else "4H"
+        if latest_tf not in data or len(data[latest_tf]) < 2:
+            return
+
+        df = data[latest_tf]
+        current_high = float(df["high"].iloc[-1])
+        current_low = float(df["low"].iloc[-1])
+        current_price = float(df["close"].iloc[-1])
+
+        to_close = []
+        for name, pos in self.open_positions.items():
+            if pos.direction == "long":
+                if current_low <= pos.stop_loss:
+                    to_close.append((name, "loss", pos.stop_loss))
+                elif current_high >= pos.take_profit:
+                    to_close.append((name, "win", pos.take_profit))
+                else:
+                    pos.pnl_pips = (current_price - pos.entry_price) / self.pip_size
+            else:
+                if current_high >= pos.stop_loss:
+                    to_close.append((name, "loss", pos.stop_loss))
+                elif current_low <= pos.take_profit:
+                    to_close.append((name, "win", pos.take_profit))
+                else:
+                    pos.pnl_pips = (pos.entry_price - current_price) / self.pip_size
+
+        for name, outcome, exit_price in to_close:
+            self._close_position(name, outcome, exit_price)
+
+    def _close_position(self, module_name: str, outcome: str, exit_price: float):
+        pos = self.open_positions.pop(module_name, None)
+        if not pos:
+            return
+        if pos.direction == "long":
+            pnl_pips = (exit_price - pos.entry_price) / self.pip_size
+        else:
+            pnl_pips = (pos.entry_price - exit_price) / self.pip_size
+
+        risk_pips = abs(pos.entry_price - pos.stop_loss) / self.pip_size
+        pnl_pct = (pnl_pips / risk_pips) * pos.risk_pct if risk_pips > 0 else 0.0
+        self.balance *= (1 + pnl_pct / 100)
+
+        self.closed_trades.append({
+            "module": module_name, "outcome": outcome,
+            "pnl_pips": pnl_pips, "pnl_pct": pnl_pct,
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        logger.info(f"[{self.mode.upper()}] Closed {module_name}: {outcome} "
+                    f"{pnl_pips:+.1f}p ({pnl_pct:+.2f}%) balance=${self.balance:,.2f}")
+        self.telegram.send_trade_closed(
+            module=module_name, pair=self.pair,
+            direction=pos.direction, outcome=outcome,
+            pnl_pips=pnl_pips, pnl_pct=pnl_pct,
+            balance=self.balance,
+        )
+        self._save_state()
+
+    # ── Balance ────────────────────────────────────────────────────────────
+
+    def get_balance(self) -> float:
+        if self.mode == "mt5":
+            mt5_bal = self._mt5_get_balance()
+            if mt5_bal is not None:
+                self.balance = mt5_bal
+        return self.balance
+
+    def _daily_pnl_pct(self) -> float:
+        if self.daily_start_balance <= 0:
+            return 0.0
+        return (self.balance - self.daily_start_balance) / self.daily_start_balance * 100
+
+    def _send_balance_report(self):
+        self.telegram.send_balance(
+            balance=self.get_balance(),
+            daily_pnl=self._daily_pnl_pct(),
+            open_trades=len(self.open_positions),
+            total_trades=self.total_trades,
+        )
+
+    # ── Main loop ──────────────────────────────────────────────────────────
+
+    def run(self, duration_hours: Optional[float] = None):
+        """Start the live trading loop.
+        duration_hours=None → run forever until KeyboardInterrupt.
+        """
+        end_time = None
+        if duration_hours:
+            end_time = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+
+        mode_tag = f"[{self.mode.upper()} MODE]"
+        logger.info(f"LiveController starting {mode_tag} | pair={self.pair} "
+                    f"| balance=${self.balance:,.2f} | poll={self.poll_interval}s")
+        self.telegram.send_raw(
+            f"<b>🚀 AutoTrader Claude LIVE {mode_tag}</b>\n"
+            f"Pair: {self.pair}\n"
+            f"Balance: <code>${self.balance:,.2f}</code>\n"
+            f"Modules: Position | Swing ✓ | Intraday | Scalp\n"
+            f"Poll interval: {self.poll_interval}s",
+            parse_mode="HTML"
+        )
+
+        last_balance_time = time.time()
+
+        try:
+            while True:
+                if end_time and datetime.now(timezone.utc) >= end_time:
+                    logger.info("Duration reached — stopping LiveController")
+                    break
+
+                # 1. Load latest data
+                data = self._load_data()
+                if not data:
+                    logger.warning("No data loaded — retrying in 30s")
+                    time.sleep(30)
+                    continue
+
+                # 2. Evaluate all 4 modules
+                ts = datetime.now(timezone.utc)
+                result = self.module_manager.evaluate_all(
+                    data, pip_size=self.pip_size, timestamp=ts)
+
+                # 3. Open new positions
+                for sig in result.valid_signals:
+                    self._open_position(sig)
+
+                # 4. Check open positions
+                self._check_positions(data)
+
+                # 5. Balance report every `balance_interval` seconds
+                now = time.time()
+                if now - last_balance_time >= self.balance_interval:
+                    self._send_balance_report()
+                    self.daily_start_balance = self.balance  # reset daily tracking
+                    last_balance_time = now
+
+                # 6. Free memory
+                del data
+                gc.collect()
+
+                # Log status
+                logger.info(
+                    f"[{ts.strftime('%H:%M:%S')}] bal=${self.balance:,.2f} "
+                    f"open={len(self.open_positions)} fired={result.total_modules_fired}/4"
+                )
+                time.sleep(self.poll_interval)
+
+        except KeyboardInterrupt:
+            logger.info("LiveController stopped by user")
+        finally:
+            self._save_state()
+            self.telegram.send_raw(
+                f"<b>🛑 AutoTrader Claude STOPPED</b>\n"
+                f"Final Balance: <code>${self.balance:,.2f}</code>\n"
+                f"Total Trades: {self.total_trades}",
+                parse_mode="HTML"
+            )
