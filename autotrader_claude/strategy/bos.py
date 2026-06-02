@@ -67,7 +67,7 @@ class BOSDetector:
             for i in range(idx - 3, idx)
         ]
         avg_range = np.mean(prev_ranges) if prev_ranges else 0
-        return candle_range >= avg_range * 1.5
+        return bool(candle_range >= avg_range * 1.5)
 
     def detect(self, df: pd.DataFrame) -> List[BOS]:
         """Detect all BOS events in the dataframe."""

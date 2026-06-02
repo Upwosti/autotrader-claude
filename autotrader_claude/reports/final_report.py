@@ -11,7 +11,7 @@ from loguru import logger
 from config import StrategyParams
 from database.supabase_client import SupabaseClient
 
-REPORTS_DIR = "C:\\AutoTraderClaude\\reports_output"
+REPORTS_DIR = os.path.join(os.path.expanduser("~"), "autotrader_reports")
 
 
 class FinalReport:

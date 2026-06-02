@@ -16,72 +16,62 @@ from backtester.engine import BacktestEngine, BacktestResult
 class TestDataLoader(unittest.TestCase):
     def test_load_returns_dataframe(self):
         loader = DataLoader()
-        df = loader.load(pair="XAUUSD", timeframe="H1", source="synthetic")
+        df = loader.load(pair="XAUUSD", timeframe="H1", synthetic_fallback=True)
         self.assertFalse(df.empty)
 
     def test_required_columns_present(self):
         loader = DataLoader()
-        df = loader.load(pair="XAUUSD", timeframe="H1", source="synthetic")
+        df = loader.load(pair="XAUUSD", timeframe="H1", synthetic_fallback=True)
         for col in ["open", "high", "low", "close", "volume"]:
             self.assertIn(col, df.columns)
 
     def test_high_gte_low(self):
         loader = DataLoader()
-        df = loader.load(pair="XAUUSD", timeframe="H1", source="synthetic")
+        df = loader.load(pair="XAUUSD", timeframe="H1", synthetic_fallback=True)
         self.assertTrue((df["high"] >= df["low"]).all())
 
     def test_synthetic_fallback(self):
         loader = DataLoader()
-        df = loader.generate_synthetic("XAUUSD", bars=200)
+        df = loader.generate_synthetic("XAUUSD", n_bars=200)
         self.assertEqual(len(df), 200)
 
 
 class TestBacktestEngine(unittest.TestCase):
-    def setUp(self):
-        self.params = StrategyParams()
+    @classmethod
+    def setUpClass(cls):
+        cls.params = StrategyParams()
+        cls.result = BacktestEngine(cls.params).run(pair="XAUUSD")
 
     def test_run_returns_result(self):
-        engine = BacktestEngine(self.params)
-        result = engine.run(pair="XAUUSD")
-        self.assertIsInstance(result, BacktestResult)
+        self.assertIsInstance(self.result, BacktestResult)
 
     def test_win_rate_in_range(self):
-        engine = BacktestEngine(self.params)
-        result = engine.run(pair="XAUUSD")
-        self.assertGreaterEqual(result.win_rate, 0)
-        self.assertLessEqual(result.win_rate, 1)
+        self.assertGreaterEqual(self.result.win_rate, 0)
+        self.assertLessEqual(self.result.win_rate, 1)
 
     def test_total_trades_non_negative(self):
-        engine = BacktestEngine(self.params)
-        result = engine.run(pair="XAUUSD")
-        self.assertGreaterEqual(result.total_trades, 0)
+        self.assertGreaterEqual(self.result.total_trades, 0)
 
     def test_winning_plus_losing_equals_total(self):
-        engine = BacktestEngine(self.params)
-        result = engine.run(pair="XAUUSD")
-        self.assertEqual(result.winning_trades + result.losing_trades, result.total_trades)
+        # total_trades includes open trades (neither SL nor TP hit on next candle)
+        self.assertLessEqual(
+            self.result.winning_trades + self.result.losing_trades,
+            self.result.total_trades,
+        )
 
     def test_max_drawdown_non_negative(self):
-        engine = BacktestEngine(self.params)
-        result = engine.run(pair="XAUUSD")
-        self.assertGreaterEqual(result.max_drawdown_pct, 0)
+        self.assertGreaterEqual(self.result.max_drawdown_pct, 0)
 
     def test_strategy_version_set(self):
-        engine = BacktestEngine(self.params)
-        result = engine.run(pair="XAUUSD")
-        self.assertEqual(result.strategy_version, self.params.version)
+        self.assertEqual(self.result.strategy_version, self.params.version)
 
     def test_overfitting_flag_logic(self):
-        engine = BacktestEngine(self.params)
-        result = engine.run(pair="XAUUSD")
-        if result.total_trades < 50 and result.win_rate > 0.75:
-            self.assertTrue(result.overfitting_flag)
+        if self.result.total_trades < 50 and self.result.win_rate > 0.75:
+            self.assertTrue(self.result.overfitting_flag)
 
     def test_small_sample_flag(self):
-        engine = BacktestEngine(self.params)
-        result = engine.run(pair="XAUUSD")
-        if result.total_trades < 30:
-            self.assertTrue(result.small_sample_flag)
+        if self.result.total_trades < 30:
+            self.assertTrue(self.result.small_sample_flag)
 
 
 class TestStrategyParams(unittest.TestCase):

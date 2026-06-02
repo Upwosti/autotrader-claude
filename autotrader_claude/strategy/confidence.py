@@ -1,6 +1,8 @@
 """
-Confidence Score Calculator — rates setups 0–10.
-Each ICT confluence factor adds to the score.
+Confidence Score Calculator — rates setups 0–10 using the full ICT confluence
+model (liquidity sweep, BOS/MSS, PD array quality, kill zone, HTF bias,
+displacement, plus double-purge / SMT / CRT-TBS / IRL-ERL / key-liquidity
+bonuses, minus spread / news / DXY penalties).
 """
 
 from dataclasses import dataclass
@@ -9,6 +11,14 @@ from config import StrategyParams
 from strategy.liquidity import LiquiditySweep
 from strategy.bos import BOS
 from strategy.fvg import FVG
+
+
+# Per-array quality contribution (out of 2.0 max).
+PD_ARRAY_QUALITY = {
+    "OB": 2.0, "BB": 2.0, "MB": 2.0, "PB": 2.0,
+    "IFVG": 1.5, "FVG": 1.5, "IRB": 1.5, "LV": 1.5, "BPR": 1.5,
+    "RB": 1.0, "VI": 1.0,
+}
 
 
 @dataclass
@@ -37,82 +47,100 @@ class ConfidenceScorer:
         news_clear: bool,
         dxy_conflict: bool = False,
         pair: str = "XAUUSD",
+        pd_array_kind: Optional[str] = None,
+        double_purge: bool = False,
+        smt_divergence: bool = False,
+        crt_tbs: bool = False,
+        irl_erl_aligned: bool = False,
+        key_liquidity_dol: bool = False,
     ) -> SetupScore:
         breakdown = {}
         score = 0.0
 
-        # 1. Liquidity sweep present (+2)
+        # 1. Liquidity sweep confirmed (+2)
         if sweep and sweep.confirmed:
-            pts = 2.0
-            breakdown["liquidity_sweep"] = pts
-            score += pts
+            breakdown["liquidity_sweep"] = 2.0
+            score += 2.0
         else:
             breakdown["liquidity_sweep"] = 0.0
 
-        # 2. BOS confirmed (+2)
+        # 2. BOS / MSS confirmed (+2)
         if bos:
-            pts = 2.0
-            breakdown["bos"] = pts
-            score += pts
+            breakdown["bos"] = 2.0
+            score += 2.0
         else:
             breakdown["bos"] = 0.0
 
-        # 3. FVG present and valid (+1.5)
-        if fvg and fvg.valid:
-            pts = 1.5
-            breakdown["fvg"] = pts
+        # 3. PD Array quality (variable). Prefer the explicit PD array kind;
+        #    fall back to a valid FVG.
+        if pd_array_kind and pd_array_kind in PD_ARRAY_QUALITY:
+            pts = PD_ARRAY_QUALITY[pd_array_kind]
+            breakdown["pd_array"] = pts
             score += pts
+        elif fvg and fvg.valid:
+            breakdown["pd_array"] = 1.5
+            score += 1.5
         else:
-            breakdown["fvg"] = 0.0
+            breakdown["pd_array"] = 0.0
 
-        # 4. Kill zone timing (+1.5)
+        # 4. Kill zone (+1.5)
         if in_kill_zone:
-            pts = 1.5
-            breakdown["kill_zone"] = pts
-            score += pts
+            breakdown["kill_zone"] = 1.5
+            score += 1.5
         else:
             breakdown["kill_zone"] = 0.0
 
-        # 5. Higher TF bias aligned (+1.5)
+        # 5. HTF bias aligned (+1.5)
         if higher_tf_bias_aligned:
-            pts = 1.5
-            breakdown["htf_bias"] = pts
-            score += pts
+            breakdown["htf_bias"] = 1.5
+            score += 1.5
         else:
             breakdown["htf_bias"] = 0.0
 
         # 6. Displacement present (+1)
         if displacement_present:
-            pts = 1.0
-            breakdown["displacement"] = pts
-            score += pts
+            breakdown["displacement"] = 1.0
+            score += 1.0
         else:
             breakdown["displacement"] = 0.0
 
-        # 7. Liquidity wick quality bonus (+0.5)
+        # 7. Strong wick quality (+0.5)
         if sweep and sweep.wick_pct >= 0.5:
-            pts = 0.5
-            breakdown["strong_wick"] = pts
-            score += pts
+            breakdown["strong_wick"] = 0.5
+            score += 0.5
         else:
             breakdown["strong_wick"] = 0.0
 
+        # ─── Bonuses ──────────────────────────────────────────────────────
+        if double_purge:
+            breakdown["double_purge"] = 1.0
+            score += 1.0
+        if smt_divergence:
+            breakdown["smt"] = 1.0
+            score += 1.0
+        if crt_tbs:
+            breakdown["crt_tbs"] = 0.5
+            score += 0.5
+        if irl_erl_aligned:
+            breakdown["irl_erl"] = 0.5
+            score += 0.5
+        if key_liquidity_dol:
+            breakdown["key_liquidity"] = 0.5
+            score += 0.5
+
         # ─── Deductions ───────────────────────────────────────────────────
-        # Spread filter (-1 if spread too wide)
         if not spread_ok:
             score -= 1.0
             breakdown["spread_penalty"] = -1.0
         else:
             breakdown["spread_penalty"] = 0.0
 
-        # News proximity (-1)
         if not news_clear:
             score -= 1.0
             breakdown["news_penalty"] = -1.0
         else:
             breakdown["news_penalty"] = 0.0
 
-        # DXY conflict for XAUUSD (-2)
         if pair == "XAUUSD" and dxy_conflict:
             score -= 2.0
             breakdown["dxy_conflict"] = -2.0
@@ -121,7 +149,6 @@ class ConfidenceScorer:
 
         score = max(0.0, min(10.0, score))
         passed = score >= self.params.confidence_threshold
-
         reason = self._build_reason(breakdown, passed, score, self.params.confidence_threshold)
         return SetupScore(total=score, breakdown=breakdown, passed=passed, reason=reason)
 

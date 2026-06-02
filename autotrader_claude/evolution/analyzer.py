@@ -11,7 +11,7 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
-from config import ANTHROPIC_API_KEY
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_MAX_TOKENS
 
 
 class ResultAnalyzer:
@@ -52,8 +52,8 @@ class ResultAnalyzer:
         )
         try:
             msg = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=120,
+                model=CLAUDE_MODEL,
+                max_tokens=CLAUDE_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
             )
             return msg.content[0].text.strip()

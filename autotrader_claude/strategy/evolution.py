@@ -1,5 +1,7 @@
 """
 Strategy Evolver — mutates parameters, compares results, keeps improvements.
+Uses composite_score (expectancy + win_rate + profit_factor + sharpe + stability - drawdown penalty)
+instead of win_rate alone to avoid overfitting.
 """
 
 import random
@@ -15,12 +17,12 @@ class StrategyEvolver:
     def __init__(self):
         self.current_params = StrategyParams()
         self.best_params = copy.deepcopy(self.current_params)
+        self.best_score: float = 0.0
         self.best_win_rate: float = 0.0
         self.iteration: int = 1
 
     def mutate(self, params: StrategyParams) -> Tuple[StrategyParams, str, str, str]:
-        """
-        Randomly mutate one parameter.
+        """Randomly mutate one parameter.
         Returns: (new_params, param_name, old_value, new_value)
         """
         new_params = copy.deepcopy(params)
@@ -46,44 +48,58 @@ class StrategyEvolver:
 
     def evaluate(
         self,
+        new_score: float,
         new_win_rate: float,
-        old_win_rate: float,
         new_params: StrategyParams,
-        min_trades: int = 100,
+        min_trades: int = 30,
         trade_count: int = 0,
+        mc_survival: float = 1.0,
+        max_drawdown: float = 0.0,
     ) -> Tuple[bool, str]:
-        """
-        Compare new vs old win rate.
+        """Compare new vs current composite score.
+        Rejects results with MC survival < 60% or drawdown > 25%.
         Returns (kept: bool, decision: str).
         """
         if trade_count < min_trades:
             return False, f"insufficient_data ({trade_count} trades)"
 
-        if new_win_rate > old_win_rate:
-            logger.info(f"Improvement: {old_win_rate:.1%} → {new_win_rate:.1%} — keeping")
-            if new_win_rate > self.best_win_rate:
-                self.best_win_rate = new_win_rate
-                self.best_params = copy.deepcopy(new_params)
+        if mc_survival < 0.60:
+            logger.warning(f"Rejected: Monte Carlo survival {mc_survival:.1%} < 60%")
+            return False, "rejected_mc_survival"
+
+        if max_drawdown > 25.0:
+            logger.warning(f"Rejected: drawdown {max_drawdown:.1f}% > 25%")
+            return False, "rejected_drawdown"
+
+        if new_score > self.best_score:
+            logger.info(f"Improvement: score {self.best_score:.3f} → {new_score:.3f} | WR {new_win_rate:.1%} — keeping")
+            self.best_score = new_score
+            self.best_win_rate = new_win_rate
+            self.best_params = copy.deepcopy(new_params)
             return True, "kept_improvement"
         else:
-            logger.info(f"No improvement: {old_win_rate:.1%} vs {new_win_rate:.1%} — reverting")
+            logger.info(f"No improvement: score {self.best_score:.3f} vs {new_score:.3f} — reverting")
             return False, "reverted"
 
     def next_iteration(
         self,
+        current_score: float,
         current_win_rate: float,
         current_trade_count: int,
+        mc_survival: float = 1.0,
+        max_drawdown: float = 0.0,
     ) -> Tuple[StrategyParams, str, str, str, bool]:
-        """
-        Generate next iteration params.
+        """Generate next iteration params.
         Returns: (new_params, param_name, old_val, new_val, is_improvement)
         """
         new_params, param, old, new = self.mutate(self.current_params)
         kept, decision = self.evaluate(
+            new_score=current_score,
             new_win_rate=current_win_rate,
-            old_win_rate=self.best_win_rate,
             new_params=new_params,
             trade_count=current_trade_count,
+            mc_survival=mc_survival,
+            max_drawdown=max_drawdown,
         )
         if kept:
             self.current_params = new_params

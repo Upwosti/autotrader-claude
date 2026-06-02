@@ -7,8 +7,8 @@ numpy==1.26.4
 pandas==2.2.2
 scipy==1.13.1
 
-# Backtesting
-vectorbt==0.26.2
+# Backtesting (vectorbt 0.26.x requires Python <3.11; backtesting engine is custom)
+# vectorbt==0.26.2
 numba==0.59.1
 
 # Database
@@ -31,8 +31,8 @@ flask==3.0.3
 flask-cors==4.0.1
 
 # Data / indicators
-ta==0.11.0
-pandas-ta==0.3.14b0
+# ta==0.11.0        (build fails on Linux with Python 3.11)
+# pandas-ta==0.3.14b0  (not available for Python 3.11)
 pytz==2024.1
 
 # Scheduling
