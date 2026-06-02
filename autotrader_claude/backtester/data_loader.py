@@ -39,7 +39,11 @@ class DataLoader:
                 "XAUUSD": "GC=F", "BTCUSD": "BTC-USD",
                 "GBPUSD": "GBPUSD=X", "EURUSD": "EURUSD=X",
             }
-            tf_map = {"H1": "1h", "H4": "1h", "D1": "1d", "W1": "1wk"}
+            tf_map = {
+            "M1": "1m", "5M": "5m", "15M": "15m", "30M": "30m",
+            "1H": "1h", "H1": "1h", "2H": "1h", "4H": "1h", "H4": "1h",
+            "6H": "1h", "D1": "1d", "W1": "1wk", "MN": "1mo",
+        }
             ticker = ticker_map.get(pair, pair)
             interval = tf_map.get(timeframe, "1h")
             df = yf.download(ticker, start=start, end=end, interval=interval, progress=False)
@@ -88,7 +92,11 @@ class DataLoader:
         lows = np.minimum(opens, closes) * (1 - wicks * np.random.uniform(0.3, 1.0, n_bars))
         volumes = np.random.randint(100, 10000, n_bars).astype(float)
 
-        tf_hours = {"H1": 1, "H4": 4, "D1": 24, "W1": 168}
+        tf_hours = {
+            "M1": 1/60, "5M": 5/60, "15M": 0.25, "30M": 0.5,
+            "1H": 1, "H1": 1, "2H": 2, "4H": 4, "H4": 4,
+            "6H": 6, "D1": 24, "W1": 168, "MN": 720,
+        }
         freq_hours = tf_hours.get(timeframe, 4)
         start_dt = datetime(2020, 1, 1)
         times = [start_dt + timedelta(hours=i * freq_hours) for i in range(n_bars)]

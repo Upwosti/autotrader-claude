@@ -117,12 +117,14 @@ class BacktestEngine:
         all_bos = engine.bos.detect(h4_df)
         all_pd = engine.pd_scanner.scan_all(h4_df)
         all_dp = engine.double_purge.detect(h4_df, lookback=n)
+        all_amd = engine.crt_tbs.scan_amd_all(h4_df)
 
         # Sort by the bar index at which each becomes known.
         all_sweeps.sort(key=lambda s: s.sweep_candle_index)
         all_bos.sort(key=lambda b: b.break_candle_index)
         all_pd.sort(key=lambda h: h.index)
         all_dp.sort(key=lambda d: d.index)
+        all_amd.sort(key=lambda a: a.manip_index)
 
         close = h4_df["close"].to_numpy(dtype=float)
         index = h4_df.index
@@ -134,8 +136,8 @@ class BacktestEngine:
         last_w1 = -1
         htf_bias = "neutral"
 
-        si = bi = pi = di = 0
-        cur_sweep = cur_bos = cur_dp = None
+        si = bi = pi = di = ai = 0
+        cur_sweep = cur_bos = cur_dp = cur_amd = None
         # Track most-recent PD hit per direction for fast nearest lookups.
         for i in range(lookback, n - 1):
             # advance sweep/bos/dp pointers to include everything known by bar i
@@ -151,6 +153,9 @@ class BacktestEngine:
             while di < len(all_dp) and all_dp[di].index <= i:
                 cur_dp = all_dp[di]
                 di += 1
+            while ai < len(all_amd) and all_amd[ai].manip_index <= i:
+                cur_amd = all_amd[ai]
+                ai += 1
             known_pd = all_pd[:pi]
 
             d1_end = max(1, i // 4)
@@ -164,7 +169,7 @@ class BacktestEngine:
             ct = current_time.to_pydatetime() if hasattr(current_time, "to_pydatetime") else current_time
             sig = self._fast_signal(
                 engine, h4_df, i, float(close[i]), ct,
-                cur_sweep, cur_bos, known_pd, htf_bias, cur_dp,
+                cur_sweep, cur_bos, known_pd, htf_bias, cur_dp, cur_amd,
             )
             signals.append((i, sig))
         return signals
@@ -181,24 +186,36 @@ class BacktestEngine:
         return cands[0]
 
     def _fast_signal(self, engine, h4_df, i, price, ct,
-                     sweep, bos, known_pd, htf_bias, dp=None):
+                     sweep, bos, known_pd, htf_bias, dp=None, amd=None):
         """Build a TradeSignal from pre-computed events (no re-detection).
 
-        Multiple independent entry plans are honoured (per the ICT material there
-        is more than one valid way to enter). Direction is resolved by the first
-        plan that fires, in order of strength:
+        Multiple independent entry plans are honoured simultaneously.
+        Order of priority (first match sets direction):
 
-            Plan A  sweep + BOS aligned          (classic liquidity-grab reversal)
-            Plan B  double purge                 (both sides swept → run opposite)
-            Plan C  BOS alone                    (market-structure shift)
-            Plan D  HTF bias + matching PD array  (continuation into a PD array)
+            Plan E  AMD 3-candle CRT               (highest — manipulation on 3rd candle)
+            Plan A  sweep + BOS aligned             (classic liquidity-grab reversal)
+            Plan B  double purge                    (both sides swept → run opposite)
+            Plan C  BOS alone                       (market-structure shift)
+            Plan D  HTF bias + matching PD array    (continuation into a PD array)
         """
         in_kz, session = engine._in_kill_zone(ct)
 
         direction = None
         plan = "none"
+        amd_entry = None
+        amd_sl = None
+
+        # Plan E — AMD 3-candle: Accumulation → Manipulation → Distribution
+        # Entry is at the close of the Manipulation candle (3rd candle).
+        # This is the highest-priority pattern per ICT CRT material.
+        if amd is not None and amd.valid and amd.manip_index == i:
+            direction = "long" if amd.direction == "bullish" else "short"
+            plan = "amd_3candle"
+            amd_entry = amd.entry_price
+            amd_sl = amd.stop_price
+
         # Plan A — liquidity sweep confirmed by a BOS in the same direction.
-        if sweep and bos:
+        if direction is None and sweep and bos:
             if sweep.direction == "bullish_sweep" and bos.direction == "bullish_bos":
                 direction, plan = "long", "sweep+bos"
             elif sweep.direction == "bearish_sweep" and bos.direction == "bearish_bos":
@@ -261,8 +278,14 @@ class BacktestEngine:
                 reason=f"[{plan}] " + score.reason, pd_array=pd_hit,
             )
 
-        entry = pd_hit.midpoint if pd_hit else price
-        sl = engine._calc_stop_loss(direction, sweep, pd_hit, entry)
+        # AMD plan uses its own precomputed entry/SL; otherwise use PD array or price
+        if plan == "amd_3candle" and amd_entry is not None:
+            entry = amd_entry
+            sl = amd_sl
+        else:
+            entry = pd_hit.midpoint if pd_hit else price
+            sl = engine._calc_stop_loss(direction, sweep, pd_hit, entry)
+
         tp = engine._calc_take_profit(direction, entry, sl, None)
         rrr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
         valid = rrr >= engine.params.min_rrr
@@ -271,7 +294,7 @@ class BacktestEngine:
             stop_loss=sl, take_profit=tp, rrr=rrr, confidence=score,
             sweep=sweep, bos=bos, fvg=None, session=session, timestamp=ct,
             valid=valid, reason=f"[{plan}] " + score.reason + f" | RRR={rrr:.2f}",
-            pd_array=pd_hit,
+            pd_array=pd_hit, amd=amd if plan == "amd_3candle" else None,
         )
 
     def run(

@@ -22,7 +22,7 @@ from strategy.key_liquidity import KeyLiquidityDetector, KeyLevel
 from strategy.irl_erl import IRLERLAnalyzer, DOLState
 from strategy.smt import SMTDivergenceDetector, SMTDivergence
 from strategy.double_purge import DoublePurgeDetector, DoublePurge
-from strategy.crt_tbs import CRTTBSDetector
+from strategy.crt_tbs import CRTTBSDetector, AMDPattern
 
 
 @dataclass
@@ -46,6 +46,7 @@ class TradeSignal:
     double_purge: Optional[DoublePurge] = None
     smt: Optional[SMTDivergence] = None
     key_level: Optional[KeyLevel] = None
+    amd: Optional[AMDPattern] = None   # AMD 3-candle CRT pattern
 
 
 class ICTEngine:
@@ -170,9 +171,15 @@ class ICTEngine:
         sweep = self.liquidity.get_latest_sweep(h4_df)
         bos = self.bos.get_latest_bos(h4_df)
 
-        # Step 7 — determine direction (sweep+BOS, else DOL, else double purge)
+        # AMD 3-candle pattern (detect before direction logic)
+        amd = self.crt_tbs.detect_amd(h4_df)
+
+        # Step 7 — determine direction (AMD 3-candle > sweep+BOS > dp > DOL)
         direction = None
-        if sweep and bos:
+        # AMD pattern: entry on the 3rd candle manipulation close
+        if amd is not None and amd.valid:
+            direction = "long" if amd.direction == "bullish" else "short"
+        if direction is None and sweep and bos:
             if sweep.direction == "bullish_sweep" and bos.direction == "bullish_bos":
                 direction = "long"
             elif sweep.direction == "bearish_sweep" and bos.direction == "bearish_bos":
@@ -192,10 +199,10 @@ class ICTEngine:
         # legacy FVG for the dataclass / scoring fallback
         fvg = self.fvg.nearest_fvg(h4_df, current_price, direction or "long")
 
-        # Step 5 — CRT + TBS confirmation
+        # Step 5 — CRT + TBS confirmation (standard)
         crt = self.crt_tbs.detect_crt(h4_df)
         tbs = self.crt_tbs.detect_tbs(h4_df, crt) if crt else None
-        crt_ok = self.crt_tbs.is_high_probability_tbs(h4_df, crt, tbs) if (crt and tbs) else False
+        crt_ok = self.crt_tbs.is_high_probability_tbs(crt, tbs) if (crt and tbs) else False
 
         # Step 6 — SMT divergence confluence
         smt_div = None
@@ -258,23 +265,29 @@ class ICTEngine:
                 rrr=0, confidence=score, sweep=sweep, bos=bos, fvg=fvg,
                 session=session, timestamp=current_time, valid=False,
                 reason=reason, pd_array=pd_hit, dol=dol,
-                double_purge=dp, smt=smt_div, key_level=key_level,
+                double_purge=dp, smt=smt_div, key_level=key_level, amd=amd,
             )
 
-        # Entry = PD array midpoint, else FVG midpoint, else current price
-        if pd_hit:
+        # Entry priority: AMD manipulation close > PD array > FVG > current price
+        if amd and amd.valid and amd.entry_price > 0:
+            entry = amd.entry_price
+            sl = amd.stop_price
+        elif pd_hit:
             entry = pd_hit.midpoint
+            sl = self._calc_stop_loss(direction, sweep, pd_hit, entry)
         elif fvg and fvg.valid:
             entry = fvg.midpoint
+            sl = self._calc_stop_loss(direction, sweep, None, entry)
         else:
             entry = current_price
+            sl = self._calc_stop_loss(direction, sweep, None, entry)
 
-        sl = self._calc_stop_loss(direction, sweep, pd_hit, entry)
         tp = self._calc_take_profit(direction, entry, sl, key_level)
         rrr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
 
         valid = rrr >= self.params.min_rrr
-        reason = score.reason + f" | RRR={rrr:.2f}"
+        amd_tag = " | AMD-3candle" if (amd and amd.valid) else ""
+        reason = score.reason + f" | RRR={rrr:.2f}{amd_tag}"
 
         return TradeSignal(
             pair=self.pair, direction=direction, entry_price=entry,
@@ -282,5 +295,5 @@ class ICTEngine:
             sweep=sweep, bos=bos, fvg=fvg, session=session,
             timestamp=current_time, valid=valid, reason=reason,
             pd_array=pd_hit, dol=dol, double_purge=dp, smt=smt_div,
-            key_level=key_level,
+            key_level=key_level, amd=amd,
         )

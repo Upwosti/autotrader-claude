@@ -383,7 +383,7 @@ class TestCRTTBS(unittest.TestCase):
             if tbs is not None:
                 self.assertIsInstance(tbs.bodies_inside, int)
                 self.assertIn(tbs.direction, ["bullish", "bearish", "none"])
-                hp = det.is_high_probability_tbs(self.df, crt, tbs)
+                hp = det.is_high_probability_tbs(crt, tbs)
                 self.assertIsInstance(hp, bool)
 
 
