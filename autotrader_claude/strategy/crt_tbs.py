@@ -122,26 +122,47 @@ class CRTTBSDetector:
     # ── CRT detection (on LTF1 / CRT timeframe) ──────────────────────────
 
     def detect_crt(self, df: pd.DataFrame, timeframe: str = "4H") -> Optional[CRT]:
-        """Find the most recent CRT reference candle on the given dataframe.
-        The CRT candle must have range >= crt_range_factor × avg_range.
-        Leaves at least 2 bars after it for TBS confirmation.
+        """Find the CRT reference candle: highest-volume candle in last 20 bars.
+
+        PDF §4: "The reference candle is the highest-volume candle within the
+        last 20 bars." Falls back to largest-range if volume unavailable.
+        Requires at least 2 bars after the candle for TBS confirmation.
         """
         n = len(df)
         if n < 5:
             return None
         h = df["high"].to_numpy(dtype=float)
         l = df["low"].to_numpy(dtype=float)
-        rng = h - l
-        avg = float(np.mean(rng))
-        thr = avg * self.params.crt_range_factor
-        for i in range(n - 3, -1, -1):
-            if rng[i] >= thr and rng[i] > 0:
+
+        lookback = min(20, n - 2)   # last 20 bars, leave 2 after
+        window_start = n - 2 - lookback   # guaranteed to have 2 bars after
+
+        # Use volume if available, else fall back to range
+        if "volume" in df.columns:
+            vol = df["volume"].to_numpy(dtype=float)
+            vol_window = vol[window_start: n - 2]
+            if vol_window.max() > 0:
+                rel_idx = int(np.argmax(vol_window))
+                i = window_start + rel_idx
                 return CRT(
                     index=i, high=float(h[i]), low=float(l[i]),
                     midpoint=float((h[i] + l[i]) / 2),
-                    range_size=float(rng[i]),
+                    range_size=float(h[i] - l[i]),
                     timeframe=timeframe,
                 )
+
+        # Fallback: largest range in last 20 bars
+        rng = h - l
+        rng_window = rng[window_start: n - 2]
+        rel_idx = int(np.argmax(rng_window))
+        i = window_start + rel_idx
+        if rng[i] > 0:
+            return CRT(
+                index=i, high=float(h[i]), low=float(l[i]),
+                midpoint=float((h[i] + l[i]) / 2),
+                range_size=float(rng[i]),
+                timeframe=timeframe,
+            )
         return None
 
     # ── TBS detection (on LTF2 / TBS timeframe) ──────────────────────────

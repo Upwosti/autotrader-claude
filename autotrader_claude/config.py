@@ -31,10 +31,12 @@ BIAS_TIMEFRAMES: List[str] = ["W1", "D1"]
 ENTRY_TIMEFRAME: str = "H4"
 CONFIRMATION_TIMEFRAME: str = "H1"
 
-# ─── SESSION / KILL ZONES (UTC) ──────────────────────────────────────────────
-LONDON_KILL_ZONE: Dict[str, int] = {"start": 7, "end": 10}    # 07:00–10:00 UTC
-NY_KILL_ZONE: Dict[str, int] = {"start": 13, "end": 16}        # 13:00–16:00 UTC
-NEWS_BLACKOUT_MINUTES: int = 10                                  # skip 10 min before high-impact news
+# ─── SESSION / KILL ZONES (UTC) — per PDF blueprint ─────────────────────────
+LONDON_KILL_ZONE: Dict[str, int] = {"start": 2, "end": 5}      # 02:00–05:00 UTC (PDF §8)
+NY_KILL_ZONE: Dict[str, int] = {"start": 7, "end": 10}         # 07:00–10:00 UTC (PDF §8)
+NY_PM_KILL_ZONE: Dict[str, int] = {"start": 13, "end": 16}     # 13:00–16:00 UTC continuation only
+ASIAN_SESSION: Dict[str, int] = {"start": 22, "end": 2}        # 22:00–02:00 UTC accumulation only
+NEWS_BLACKOUT_MINUTES: int = 30                                  # PDF §13: 30 min before news
 
 # ─── MT5 CONNECTION ──────────────────────────────────────────────────────────
 # Native MetaTrader5 package only works on Windows.
@@ -43,8 +45,8 @@ MT5_HOST: str = os.getenv("MT5_HOST", "localhost")
 MT5_PORT: int = int(os.getenv("MT5_PORT", "18812"))
 
 # ─── RISK MANAGEMENT ─────────────────────────────────────────────────────────
-RISK_PER_TRADE_PCT: float = 1.0          # % of account per trade
-DAILY_LOSS_LIMIT_PCT: float = 2.0        # max daily drawdown %
+RISK_PER_TRADE_PCT: float = 1.0          # % of account per trade (PDF §11)
+DAILY_LOSS_LIMIT_PCT: float = 3.0        # 3% max daily drawdown (PDF §11)
 MAX_DRAWDOWN_PCT: float = 5.0            # hard stop drawdown %
 MAX_SPREAD_PIPS: Dict[str, float] = {
     "XAUUSD": 0.5,
@@ -52,7 +54,8 @@ MAX_SPREAD_PIPS: Dict[str, float] = {
     "GBPUSD": 0.8,
     "EURUSD": 0.6,
 }
-MAX_OPEN_TRADES: int = 1                  # one trade at a time across all pairs
+MAX_OPEN_TRADES: int = 3                  # max 3 concurrent positions (PDF §11)
+OFF_SESSION_MIN_SCORE: float = 8.0       # score needed to trade outside kill zones (PDF §8)
 
 # ─── STRATEGY PARAMETERS (evolvable) ─────────────────────────────────────────
 @dataclass
@@ -77,16 +80,19 @@ class StrategyParams:
     # RRR
     min_rrr: float = 3.0                        # minimum risk:reward ratio
 
-    # Kill zones (hours UTC)
-    london_start: int = 7
-    london_end: int = 10
-    ny_start: int = 13
-    ny_end: int = 16
+    # Kill zones (hours UTC) — PDF §8
+    london_start: int = 2    # London: 02:00–05:00 UTC
+    london_end: int = 5
+    ny_start: int = 7        # NY AM: 07:00–10:00 UTC
+    ny_end: int = 10
+    ny_pm_start: int = 13   # NY PM: 13:00–16:00 (continuation only)
+    ny_pm_end: int = 16
 
     # Session filter
     use_london: bool = True
     use_ny: bool = True
-    use_asia: bool = False
+    use_ny_pm: bool = True   # continuation only
+    use_asia: bool = False   # Asian = accumulation, no new trades
 
     # ─── New PD Array parameters ──────────────────────────────────────────
     # Order Block

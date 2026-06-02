@@ -171,25 +171,45 @@ class LiveController:
         except Exception as e:
             logger.warning(f"State load failed: {e}")
 
-    def _in_kill_zone(self, ts: datetime) -> bool:
-        """Return True if current UTC hour is within London or NY kill zone.
-        If both kill zones are disabled in params, always allow entries.
+    def _in_kill_zone(self, ts: datetime, signal_score: float = 0.0) -> bool:
+        """Return True if UTC time is within an active kill zone.
+
+        PDF §8 rules:
+          London: 02:00–05:00 UTC  (+1.5 confidence bonus, applied in scorer)
+          NY AM:  07:00–10:00 UTC  (+1.5 confidence bonus)
+          NY PM:  13:00–16:00 UTC  (continuation only, no bonus)
+          Off-session: allowed only if confidence score >= 8.0
+          Asian (22:00–02:00): accumulation only — no new trades
         """
         hour = ts.hour
-        london_start = getattr(self.params, "london_start", 7)
-        london_end = getattr(self.params, "london_end", 10)
-        ny_start = getattr(self.params, "ny_start", 13)
-        ny_end = getattr(self.params, "ny_end", 16)
-        use_london = getattr(self.params, "use_london", True)
-        use_ny = getattr(self.params, "use_ny", True)
+        p = self.params
+        london_start = getattr(p, "london_start", 2)
+        london_end   = getattr(p, "london_end",   5)
+        ny_start     = getattr(p, "ny_start",      7)
+        ny_end       = getattr(p, "ny_end",       10)
+        ny_pm_start  = getattr(p, "ny_pm_start",  13)
+        ny_pm_end    = getattr(p, "ny_pm_end",    16)
+        use_london   = getattr(p, "use_london",  True)
+        use_ny       = getattr(p, "use_ny",      True)
+        use_ny_pm    = getattr(p, "use_ny_pm",   True)
+
+        # Asian session: 22:00–02:00 — never trade
+        if hour >= 22 or hour < 2:
+            return False
 
         if use_london and london_start <= hour < london_end:
             return True
         if use_ny and ny_start <= hour < ny_end:
             return True
-        # If both kill zones disabled, allow all hours
-        if not use_london and not use_ny:
+        if use_ny_pm and ny_pm_start <= hour < ny_pm_end:
             return True
+
+        # Off-session override: allowed if score >= 8.0 (PDF §8)
+        from config import OFF_SESSION_MIN_SCORE
+        if signal_score >= OFF_SESSION_MIN_SCORE:
+            logger.info(f"Off-session entry allowed: score={signal_score:.1f} >= {OFF_SESSION_MIN_SCORE}")
+            return True
+
         return False
 
     def _check_emergency_stop(self) -> bool:
@@ -363,6 +383,17 @@ class LiveController:
 
         to_close = []
         for name, pos in self.open_positions.items():
+            risk = abs(pos.entry_price - pos.stop_loss)
+
+            # PDF §11: Scale-out — move SL to breakeven after 1:1 is reached
+            if not getattr(pos, "breakeven_set", False) and risk > 0:
+                one_r_target = (pos.entry_price + risk) if pos.direction == "long" else (pos.entry_price - risk)
+                if (pos.direction == "long" and current_high >= one_r_target) or \
+                   (pos.direction == "short" and current_low <= one_r_target):
+                    pos.stop_loss = pos.entry_price   # move SL to breakeven
+                    pos.breakeven_set = True          # type: ignore[attr-defined]
+                    logger.info(f"[{name}] SL moved to breakeven @ {pos.entry_price:.4f} (1:1 hit)")
+
             if pos.direction == "long":
                 if current_low <= pos.stop_loss:
                     to_close.append((name, "loss", pos.stop_loss))
@@ -475,12 +506,16 @@ class LiveController:
 
                 # 3. Open new positions (skip if emergency stop or outside kill zone)
                 emergency_stop = self._check_emergency_stop()
-                in_kill_zone = self._in_kill_zone(ts)
-                if not emergency_stop and in_kill_zone:
+                if not emergency_stop:
                     for sig in result.valid_signals:
-                        self._open_position(sig)
-                elif not in_kill_zone:
-                    logger.debug(f"Outside kill zone at {ts.strftime('%H:%M')} UTC — no new entries")
+                        best_score = getattr(sig, "confidence_score", 0.0)
+                        if self._in_kill_zone(ts, signal_score=best_score):
+                            self._open_position(sig)
+                        else:
+                            logger.debug(
+                                f"[{sig.module_name}] Outside kill zone at "
+                                f"{ts.strftime('%H:%M')} UTC (score={best_score:.1f}) — skipped"
+                            )
 
                 # 4. Check open positions
                 self._check_positions(data)
