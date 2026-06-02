@@ -9,10 +9,14 @@ Modes:
 """
 
 import argparse
+import os
 import sys
 from loguru import logger
 
 from config import ACTIVE_PARAMS
+
+_LOG_DIR = os.path.join(os.path.expanduser("~"), "autotrader_logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
 
 
 def _setup_logging():
@@ -24,7 +28,7 @@ def _setup_logging():
         colorize=True,
     )
     logger.add(
-        "C:\\AutoTraderClaude\\logs\\autotrader_{time:YYYY-MM-DD}.log",
+        os.path.join(_LOG_DIR, "autotrader_{time:YYYY-MM-DD}.log"),
         rotation="00:00",
         retention="14 days",
         level="DEBUG",

@@ -55,9 +55,25 @@ class BacktestResult:
     max_drawdown_pct: float
     sharpe_ratio: float
     profit_factor: float
+    expectancy: float = 0.0
+    monte_carlo_survival: float = 1.0
+    walk_forward_stability: float = 1.0
     trades: List[BacktestTrade] = field(default_factory=list)
     overfitting_flag: bool = False
     small_sample_flag: bool = False
+
+    def composite_score(self) -> float:
+        """Multi-metric score for evolution selection (higher = better)."""
+        dd_penalty = max(0.0, self.max_drawdown_pct - 5.0) * 0.5
+        pf_score = min(self.profit_factor, 5.0) * 0.5
+        return (
+            self.expectancy * 2.0
+            + self.win_rate * 3.0
+            + pf_score
+            + self.sharpe_ratio * 0.5
+            + self.walk_forward_stability * 1.5
+            - dd_penalty
+        )
 
     def summary(self) -> Dict:
         return {
@@ -70,6 +86,10 @@ class BacktestResult:
             "max_drawdown_pct": round(self.max_drawdown_pct, 2),
             "sharpe_ratio": round(self.sharpe_ratio, 2),
             "profit_factor": round(self.profit_factor, 2),
+            "expectancy": round(self.expectancy, 4),
+            "monte_carlo_survival": round(self.monte_carlo_survival, 4),
+            "walk_forward_stability": round(self.walk_forward_stability, 4),
+            "composite_score": round(self.composite_score(), 4),
             "overfitting_flag": self.overfitting_flag,
             "small_sample_flag": self.small_sample_flag,
         }
@@ -375,6 +395,18 @@ class BacktestEngine:
         returns = np.diff(equity_arr) / equity_arr[:-1]
         sharpe = float(np.mean(returns) / np.std(returns) * np.sqrt(252 * 6)) if np.std(returns) > 0 else 0.0
 
+        # Expectancy: (WR × avg_win_pips) - (LR × avg_loss_pips)
+        avg_win = float(np.mean([t.pnl_pips for t in wins])) if wins else 0.0
+        avg_loss = float(np.mean([abs(t.pnl_pips) for t in losses])) if losses else 0.0
+        loss_rate = 1.0 - win_rate
+        expectancy = (win_rate * avg_win) - (loss_rate * avg_loss)
+
+        # Monte Carlo survival: simulate 500 random sequences, check max DD < 20%
+        mc_survival = self._monte_carlo_survival(trades, initial_capital, runs=500, max_dd_limit=20.0)
+
+        # Walk-forward stability: split into 3 segments, compare win rates
+        wf_stability = self._walk_forward_stability(trades)
+
         small_sample = len(trades) < 30
         overfitting = win_rate > 0.75 and len(trades) < 50
 
@@ -400,7 +432,51 @@ class BacktestEngine:
             max_drawdown_pct=max_dd,
             sharpe_ratio=sharpe,
             profit_factor=profit_factor,
+            expectancy=expectancy,
+            monte_carlo_survival=mc_survival,
+            walk_forward_stability=wf_stability,
             trades=trades,
             overfitting_flag=overfitting,
             small_sample_flag=small_sample,
         )
+
+    def _monte_carlo_survival(self, trades: list, initial_capital: float,
+                               runs: int = 500, max_dd_limit: float = 20.0) -> float:
+        """Fraction of Monte Carlo runs where max drawdown stays below max_dd_limit%."""
+        if len(trades) < 10:
+            return 1.0
+        pnl_pcts = np.array([t.pnl_pct / 100 for t in trades if t.pnl_pct is not None])
+        if len(pnl_pcts) == 0:
+            return 1.0
+        rng = np.random.default_rng(42)
+        survived = 0
+        for _ in range(runs):
+            seq = rng.choice(pnl_pcts, size=len(pnl_pcts), replace=True)
+            cap = initial_capital
+            peak = cap
+            dd = 0.0
+            for r in seq:
+                cap *= (1 + r)
+                if cap > peak:
+                    peak = cap
+                dd = max(dd, (peak - cap) / peak * 100)
+            if dd < max_dd_limit:
+                survived += 1
+        return survived / runs
+
+    def _walk_forward_stability(self, trades: list) -> float:
+        """Stability score: 1 - std(segment_win_rates) / mean(segment_win_rates).
+        Higher = more consistent across time segments."""
+        if len(trades) < 15:
+            return 1.0
+        n = len(trades)
+        thirds = [trades[:n // 3], trades[n // 3: 2 * n // 3], trades[2 * n // 3:]]
+        wrs = []
+        for seg in thirds:
+            if seg:
+                wr = sum(1 for t in seg if t.outcome == "win") / len(seg)
+                wrs.append(wr)
+        if not wrs or np.mean(wrs) == 0:
+            return 1.0
+        stability = 1.0 - min(1.0, np.std(wrs) / np.mean(wrs))
+        return float(stability)

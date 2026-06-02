@@ -1,0 +1,74 @@
+{
+  "session_id": "37bacc5e-ad16-410f-840b-ad6e69bbb55b",
+  "generated_at": "2026-06-02T00:30:00Z",
+  "branch": "claude/project-review-uXL6B",
+  "model": "claude-sonnet-4-6",
+
+  "completed_tasks": [
+    "Health check: 57 tests passing",
+    "ICT Engine complete rewrite (liquidity, BOS, FVG, 12 PD arrays, CRT/TBS, IRL/ERL, SMT, double purge)",
+    "config.py: all new StrategyParams fields, CLAUDE_MODEL=claude-opus-4-8",
+    "strategy/pd_arrays.py: all 10 PD array detectors + PDArrayScanner",
+    "strategy/key_liquidity.py: KeyLiquidityDetector with week/day/session levels",
+    "strategy/irl_erl.py: IRLERLAnalyzer + DOLState",
+    "strategy/smt.py: SMTDivergenceDetector (4 correlation pairs)",
+    "strategy/double_purge.py: DoublePurgeDetector (classic/one_candle/AMD)",
+    "strategy/crt_tbs.py: CRTTBSDetector",
+    "strategy/confidence.py: 22-factor scoring, PD_ARRAY_QUALITY dict",
+    "backtester/engine.py: 40x speedup (one-shot precompute + pointer advance)",
+    "backtester/engine.py: 4-plan multi-entry (A=sweep+BOS, B=double purge, C=BOS, D=HTF+PD)",
+    "backtester/engine.py: expectancy, monte_carlo_survival, walk_forward_stability, composite_score",
+    "strategy/evolution.py: composite_score-based selection, MC survival check, drawdown limit",
+    "evolution/optimizer.py: multi-metric optimization, 5 allowed email types enforced, gc.collect()",
+    "main.py: Windows path fixed -> ~/autotrader_logs/",
+    "reports/final_report.py, evolution_report.py, mini_report.py: Windows paths fixed",
+    "reports/monthly_report.py: monthly HTML Jan 2022 -> current month, master combined HTML",
+    "docs/pdf_strategy_blueprint.md: complete 15-section ICT rule extraction",
+    "analytics/market_adaptation_engine.py: 8-regime market classifier",
+    "execution/entry_engine.py: all 4 entry models with risk calculation",
+    "audit_fix_report.md: codebase audit",
+    "final_validation_report.md: OMEGA-1 verification checklist",
+    "memory/session_checkpoint.json: this file"
+  ],
+
+  "remaining_tasks": [
+    "MT5 live trading bridge (requires live broker environment)",
+    "Emergency shutdown handler (SIGTERM -> close all positions)",
+    "Demo account 30-day validation run",
+    "Real-time data feed integration for live trading",
+    "Scheduled email dispatch (cron/APScheduler for 08:00/09:00 UTC daily, Sunday weekly, month-start monthly)"
+  ],
+
+  "active_issues": [],
+
+  "resource_status": {
+    "ram_policy": "gc.collect() after each pair backtest",
+    "cpu_policy": "pairs processed sequentially, not parallel",
+    "schedulers": "one (main.py argparse)",
+    "engines": "one per run (BacktestEngine)",
+    "email_types": 5
+  },
+
+  "key_files": {
+    "config": "autotrader_claude/config.py",
+    "ict_engine": "autotrader_claude/strategy/ict_engine.py",
+    "backtester": "autotrader_claude/backtester/engine.py",
+    "optimizer": "autotrader_claude/evolution/optimizer.py",
+    "evolver": "autotrader_claude/strategy/evolution.py",
+    "entry_engine": "execution/entry_engine.py",
+    "market_adaptation": "analytics/market_adaptation_engine.py",
+    "monthly_reports": "autotrader_claude/reports/monthly_report.py",
+    "blueprint": "docs/pdf_strategy_blueprint.md",
+    "audit": "audit_fix_report.md",
+    "validation": "final_validation_report.md"
+  },
+
+  "test_status": {
+    "total": 57,
+    "passing": 57,
+    "failing": 0,
+    "last_run": "2026-06-02"
+  },
+
+  "resume_instructions": "Run 'python -m pytest autotrader_claude/tests/ -q' to verify state. All changes are on branch claude/project-review-uXL6B. MT5 live trading tasks are the only remaining items — they require a live broker environment with MetaTrader5 Python package installed."
+}
