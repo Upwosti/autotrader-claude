@@ -371,6 +371,7 @@ class ModuleBacktester:
         trades: List[ModuleBacktestTrade],
         initial_capital: float,
         pip_size: float,
+        module_risk_pct: float = 0.01,
     ) -> Dict:
         """Compute all performance statistics from a list of trades."""
         n = len(trades)
@@ -400,14 +401,18 @@ class ModuleBacktester:
 
         gross_profit = sum(t.pnl_pips for t in wins) if wins else 0.0
         gross_loss = abs(sum(t.pnl_pips for t in losses)) if losses else 0.0
-        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (
-            float("inf") if gross_profit > 0 else 0.0
-        )
+        # Cap profit_factor at 99.0 to avoid inf in JSON serialization
+        if gross_loss > 0:
+            profit_factor = min(gross_profit / gross_loss, 99.0)
+        elif gross_profit > 0:
+            profit_factor = 99.0
+        else:
+            profit_factor = 0.0
 
         expectancy = float(np.mean([t.pnl_pips for t in trades]))
 
-        # Equity curve — each trade risks 1% of balance (R-multiple model)
-        risk_pct = 0.01
+        # Equity curve — use module-specific risk % (Position=0.5%, Swing=0.75%, etc.)
+        risk_pct = module_risk_pct
         balance = initial_capital
         equity_curve = [balance]
         for t in trades:
@@ -549,7 +554,10 @@ class ModuleBacktester:
             last_trade_bar = i
 
         # ── Compute statistics ─────────────────────────────────────────────────
-        stats = self._compute_stats(trades, initial_capital, pip_size)
+        stats = self._compute_stats(
+            trades, initial_capital, pip_size,
+            module_risk_pct=config.max_risk_pct / 100.0,
+        )
 
         is_profitable = (
             stats["win_rate"] >= 0.50 and stats["avg_rrr"] >= 2.0

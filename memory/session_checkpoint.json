@@ -1,74 +1,111 @@
 {
-  "session_id": "37bacc5e-ad16-410f-840b-ad6e69bbb55b",
-  "generated_at": "2026-06-02T00:30:00Z",
+  "checkpoint_date": "2026-06-02",
+  "session_id": "OMEGA-1-validation",
   "branch": "claude/project-review-uXL6B",
-  "model": "claude-sonnet-4-6",
+  "system_status": "NOT_READY_FOR_LIVE",
 
   "completed_tasks": [
-    "Health check: 57 tests passing",
-    "ICT Engine complete rewrite (liquidity, BOS, FVG, 12 PD arrays, CRT/TBS, IRL/ERL, SMT, double purge)",
-    "config.py: all new StrategyParams fields, CLAUDE_MODEL=claude-opus-4-8",
-    "strategy/pd_arrays.py: all 10 PD array detectors + PDArrayScanner",
-    "strategy/key_liquidity.py: KeyLiquidityDetector with week/day/session levels",
-    "strategy/irl_erl.py: IRLERLAnalyzer + DOLState",
-    "strategy/smt.py: SMTDivergenceDetector (4 correlation pairs)",
-    "strategy/double_purge.py: DoublePurgeDetector (classic/one_candle/AMD)",
-    "strategy/crt_tbs.py: CRTTBSDetector",
-    "strategy/confidence.py: 22-factor scoring, PD_ARRAY_QUALITY dict",
-    "backtester/engine.py: 40x speedup (one-shot precompute + pointer advance)",
-    "backtester/engine.py: 4-plan multi-entry (A=sweep+BOS, B=double purge, C=BOS, D=HTF+PD)",
-    "backtester/engine.py: expectancy, monte_carlo_survival, walk_forward_stability, composite_score",
-    "strategy/evolution.py: composite_score-based selection, MC survival check, drawdown limit",
-    "evolution/optimizer.py: multi-metric optimization, 5 allowed email types enforced, gc.collect()",
-    "main.py: Windows path fixed -> ~/autotrader_logs/",
-    "reports/final_report.py, evolution_report.py, mini_report.py: Windows paths fixed",
-    "reports/monthly_report.py: monthly HTML Jan 2022 -> current month, master combined HTML",
-    "docs/pdf_strategy_blueprint.md: complete 15-section ICT rule extraction",
-    "analytics/market_adaptation_engine.py: 8-regime market classifier",
-    "execution/entry_engine.py: all 4 entry models with risk calculation",
-    "audit_fix_report.md: codebase audit",
-    "final_validation_report.md: OMEGA-1 verification checklist",
-    "memory/session_checkpoint.json: this file"
+    "CRT+TBS multi-timeframe system (all 5 ICT pairs)",
+    "AMD 3-candle pattern detection (3rd candle rule enforced)",
+    "4 trading modules (Position/Swing/Intraday/Scalp)",
+    "Module backtester with multi-bar SL/TP resolution (20-120 bars per TF)",
+    "Fix: SL direction bug (bullish/bearish vs long/short in _best_entry_model)",
+    "Fix: Data alignment (resample LTF2 upward instead of independent RNG per TF)",
+    "Fix: evolver.best_params AttributeError in main.py",
+    "Fix: profit_factor infinity capped at 99.0",
+    "Fix: Position module risk% now uses config.max_risk_pct (0.5%)",
+    "Fix: crt_range_factor/tbs_min_bodies_inside added to PARAM_RANGES",
+    "ModuleEvolver with composite score (WR*3 + RRR*1.5 + PF*0.5 - DD*0.1)",
+    "LiveController paper mode with state persistence",
+    "Emergency shutdown (daily drawdown >= 10%)",
+    "Open position persistence to state file (atomic writes)",
+    "Crash recovery: restores open positions from state file",
+    "Telegram alert system (7 message types in HTML)",
+    "Truth audit report: validation/truth_audit.md",
+    "Live readiness report: validation/live_readiness_report.md",
+    "Demo challenge report: validation/demo_challenge_report.md"
   ],
 
-  "remaining_tasks": [
-    "MT5 live trading bridge (requires live broker environment)",
-    "Emergency shutdown handler (SIGTERM -> close all positions)",
-    "Demo account 30-day validation run",
-    "Real-time data feed integration for live trading",
-    "Scheduled email dispatch (cron/APScheduler for 08:00/09:00 UTC daily, Sunday weekly, month-start monthly)"
+  "failed_tasks": [
+    "MT5 live order placement (MetaTrader5 package not installed in environment)",
+    "Real data validation (no CSV files, no yfinance)",
+    "48-hour demo challenge (blocked by real data requirement)",
+    "Walk-forward with proper train/test split",
+    "Kill zones enforced in live controller (config exists, not filtered in run loop)"
   ],
 
-  "active_issues": [],
-
-  "resource_status": {
-    "ram_policy": "gc.collect() after each pair backtest",
-    "cpu_policy": "pairs processed sequentially, not parallel",
-    "schedulers": "one (main.py argparse)",
-    "engines": "one per run (BacktestEngine)",
-    "email_types": 5
+  "current_metrics": {
+    "data_source": "SYNTHETIC (RNG seed=42+offset)",
+    "position_module": {"trades": 12, "win_rate": 0.083, "rrr": 2.99, "pf": 0.12},
+    "swing_module": {"trades": 5, "win_rate": 0.0, "rrr": 0.0, "pf": 0.0},
+    "intraday_module": {"trades": 11, "win_rate": 0.091, "rrr": 2.0, "pf": 0.11},
+    "scalp_module": {"trades": 10, "win_rate": 0.0, "rrr": 0.0, "pf": 0.0},
+    "note": "All metrics are synthetic-only. Real market performance unknown."
   },
 
-  "key_files": {
-    "config": "autotrader_claude/config.py",
-    "ict_engine": "autotrader_claude/strategy/ict_engine.py",
-    "backtester": "autotrader_claude/backtester/engine.py",
-    "optimizer": "autotrader_claude/evolution/optimizer.py",
-    "evolver": "autotrader_claude/strategy/evolution.py",
-    "entry_engine": "execution/entry_engine.py",
-    "market_adaptation": "analytics/market_adaptation_engine.py",
-    "monthly_reports": "autotrader_claude/reports/monthly_report.py",
-    "blueprint": "docs/pdf_strategy_blueprint.md",
-    "audit": "audit_fix_report.md",
-    "validation": "final_validation_report.md"
+  "active_issues": [
+    {
+      "id": "P0",
+      "title": "No real market data",
+      "detail": "yfinance not installed, no CSV files. All backtests use synthetic RNG data.",
+      "fix": "pip install yfinance OR source XAUUSD CSV data for all 5 TFs"
+    },
+    {
+      "id": "P0",
+      "title": "Evolution overfits to synthetic data",
+      "detail": "200 iterations per module on RNG has no predictive value for real markets.",
+      "fix": "Acquire real data first, then run evolution with holdout validation"
+    },
+    {
+      "id": "P1",
+      "title": "MT5 not testable",
+      "detail": "MetaTrader5 Python package not installed. Cannot verify live order placement.",
+      "fix": "pip install MetaTrader5 on Windows with MT5 terminal running"
+    },
+    {
+      "id": "P1",
+      "title": "Kill zones not applied in live controller",
+      "detail": "Config has London/NY kill zone times but run loop does not filter by time.",
+      "fix": "Add kill zone check before _open_position() in run loop"
+    },
+    {
+      "id": "P2",
+      "title": "pip_value hardcoded at 1.0 in position sizing",
+      "detail": "Incorrect lot size for XAUUSD. Should be ~$10/pip for standard lot.",
+      "fix": "Implement instrument-specific pip_value lookup"
+    }
+  ],
+
+  "next_priorities": [
+    "1. pip install yfinance to get real market data",
+    "2. Run evolution on real data (disable synthetic fallback)",
+    "3. Add kill zone filter to live_controller run loop",
+    "4. Fix pip_value per instrument in _calc_lot_size",
+    "5. Paper trade 4+ weeks on real data before going live",
+    "6. Walk-forward: 70% train / 30% holdout validation"
+  ],
+
+  "architecture": {
+    "signal_generation": "CRT+TBS (5 TF pairs) + AMD 3-candle",
+    "modules": ["Position(MN/W1/D1)", "Swing(W1/D1/4H)", "Intraday(D1/4H/1H)", "Scalp(4H/1H/15M)"],
+    "entry_models": ["OB", "FVG", "BOS"],
+    "plans": ["A=sweep+BOS", "B=double_purge", "C=BOS", "D=HTF+PD", "E=AMD(highest)"],
+    "evolution_score": "WR*3 + min(RRR,4)*1.5 + min(PF,5)*0.5 - DD*0.1",
+    "live_mode": "paper|mt5",
+    "risk": {"position": "0.5%", "swing": "0.75%", "intraday": "1.0%", "scalp": "1.0%"}
   },
 
-  "test_status": {
-    "total": 57,
-    "passing": 57,
-    "failing": 0,
-    "last_run": "2026-06-02"
-  },
-
-  "resume_instructions": "Run 'python -m pytest autotrader_claude/tests/ -q' to verify state. All changes are on branch claude/project-review-uXL6B. MT5 live trading tasks are the only remaining items — they require a live broker environment with MetaTrader5 Python package installed."
+  "final_decision": "NOT_READY_FOR_LIVE",
+  "reasons": [
+    "No real market data validation",
+    "MT5 execution untested",
+    "Evolution on synthetic data is meaningless",
+    "Kill zones not enforced in live execution"
+  ],
+  "path_to_live": [
+    "Connect real data -> re-run backtests",
+    "If WR >= 40% on real data -> paper trade",
+    "Paper 4 weeks -> if WR >= 50% -> live at 0.25% risk",
+    "Scale to full risk after 3 consecutive profitable months"
+  ]
 }

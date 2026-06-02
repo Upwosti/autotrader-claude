@@ -101,17 +101,39 @@ class LiveController:
 
     # ── State persistence ──────────────────────────────────────────────────
 
+    # Maximum daily drawdown before emergency stop (10% of daily start)
+    MAX_DAILY_DRAWDOWN_PCT: float = 10.0
+
     def _save_state(self):
+        # Serialize open positions for crash recovery
+        positions_data = {}
+        for name, pos in self.open_positions.items():
+            positions_data[name] = {
+                "module_name": pos.module_name,
+                "pair": pos.pair,
+                "direction": pos.direction,
+                "entry_price": pos.entry_price,
+                "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit,
+                "rrr": pos.rrr,
+                "risk_pct": pos.risk_pct,
+                "entry_model": pos.entry_model,
+                "opened_at": pos.opened_at.isoformat(),
+            }
         state = {
             "balance": self.balance,
             "total_trades": self.total_trades,
             "daily_start_balance": self.daily_start_balance,
             "closed_trades_count": len(self.closed_trades),
+            "open_positions": positions_data,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
-            with open(_STATE_FILE, "w") as f:
+            # Atomic write: write to .tmp then rename to avoid partial reads
+            tmp_path = _STATE_FILE + ".tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(state, f, indent=2)
+            os.replace(tmp_path, _STATE_FILE)
         except Exception as e:
             logger.warning(f"State save failed: {e}")
 
@@ -124,9 +146,69 @@ class LiveController:
             self.balance = float(state.get("balance", self.balance))
             self.total_trades = int(state.get("total_trades", 0))
             self.daily_start_balance = float(state.get("daily_start_balance", self.balance))
-            logger.info(f"Restored state: balance=${self.balance:,.2f} trades={self.total_trades}")
+            # Restore open positions from state
+            for name, pdata in state.get("open_positions", {}).items():
+                try:
+                    self.open_positions[name] = OpenPosition(
+                        module_name=pdata["module_name"],
+                        pair=pdata["pair"],
+                        direction=pdata["direction"],
+                        entry_price=float(pdata["entry_price"]),
+                        stop_loss=float(pdata["stop_loss"]),
+                        take_profit=float(pdata["take_profit"]),
+                        rrr=float(pdata.get("rrr", 0)),
+                        risk_pct=float(pdata.get("risk_pct", 1.0)),
+                        entry_model=pdata.get("entry_model", "none"),
+                        opened_at=datetime.fromisoformat(pdata["opened_at"]),
+                    )
+                except Exception as pe:
+                    logger.warning(f"Could not restore position {name}: {pe}")
+            logger.info(
+                f"Restored state: balance=${self.balance:,.2f} "
+                f"trades={self.total_trades} "
+                f"open_positions={len(self.open_positions)}"
+            )
         except Exception as e:
             logger.warning(f"State load failed: {e}")
+
+    def _in_kill_zone(self, ts: datetime) -> bool:
+        """Return True if current UTC hour is within London or NY kill zone.
+        If both kill zones are disabled in params, always allow entries.
+        """
+        hour = ts.hour
+        london_start = getattr(self.params, "london_start", 7)
+        london_end = getattr(self.params, "london_end", 10)
+        ny_start = getattr(self.params, "ny_start", 13)
+        ny_end = getattr(self.params, "ny_end", 16)
+        use_london = getattr(self.params, "use_london", True)
+        use_ny = getattr(self.params, "use_ny", True)
+
+        if use_london and london_start <= hour < london_end:
+            return True
+        if use_ny and ny_start <= hour < ny_end:
+            return True
+        # If both kill zones disabled, allow all hours
+        if not use_london and not use_ny:
+            return True
+        return False
+
+    def _check_emergency_stop(self) -> bool:
+        """Return True if daily drawdown exceeds limit — stops new entries."""
+        dd = self._daily_pnl_pct()
+        if dd <= -self.MAX_DAILY_DRAWDOWN_PCT:
+            logger.warning(
+                f"[EMERGENCY STOP] Daily drawdown {dd:.1f}% "
+                f"exceeds limit {self.MAX_DAILY_DRAWDOWN_PCT:.0f}%"
+            )
+            self.telegram.send_raw(
+                f"<b>🚨 EMERGENCY STOP TRIGGERED</b>\n"
+                f"Daily drawdown: <code>{dd:.1f}%</code>\n"
+                f"Limit: {self.MAX_DAILY_DRAWDOWN_PCT:.0f}%\n"
+                f"<i>No new trades until next session reset.</i>",
+                parse_mode="HTML",
+            )
+            return True
+        return False
 
     # ── Data loading ───────────────────────────────────────────────────────
 
@@ -365,9 +447,14 @@ class LiveController:
                 result = self.module_manager.evaluate_all(
                     data, pip_size=self.pip_size, timestamp=ts)
 
-                # 3. Open new positions
-                for sig in result.valid_signals:
-                    self._open_position(sig)
+                # 3. Open new positions (skip if emergency stop or outside kill zone)
+                emergency_stop = self._check_emergency_stop()
+                in_kill_zone = self._in_kill_zone(ts)
+                if not emergency_stop and in_kill_zone:
+                    for sig in result.valid_signals:
+                        self._open_position(sig)
+                elif not in_kill_zone:
+                    logger.debug(f"Outside kill zone at {ts.strftime('%H:%M')} UTC — no new entries")
 
                 # 4. Check open positions
                 self._check_positions(data)
